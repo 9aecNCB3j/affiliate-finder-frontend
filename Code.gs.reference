@@ -113,15 +113,8 @@ function handleSearch_(input) {
   //    เพื่อให้พิมพ์คำไหนก็ได้ Top 50 + แปลง Affiliate ได้โดยไม่พึ่ง Node scrape
   var candidates = findCandidates_(query, platform);
   if (candidates.length < topN) {
-    var generated = generateCatalog_(query, platform, Math.max(topN, 50));
-    var seen = {};
-    candidates.forEach(function (p) { seen[p.product_id] = true; });
-    generated.forEach(function (p) {
-      if (!seen[p.product_id]) {
-        seen[p.product_id] = true;
-        candidates.push(p);
-      }
-    });
+    // ใช้คลังสร้างใหม่เป็นหลักเมื่อชีตยังไม่พอ — กัน product_id ซ้ำจากรอบก่อนแล้วได้ไม่ครบ topN
+    candidates = generateCatalog_(query, platform, Math.max(topN, 50));
   }
 
   var weights = getWeights_();
