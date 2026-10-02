@@ -1,0 +1,584 @@
+/**
+ * Affiliate Finder — Google Apps Script Backend
+ * Bound to spreadsheet: affiliate-sheet-bot
+ *
+ * Deploy: Extensions → Apps Script → Deploy → New deployment → Web app
+ *   Execute as: Me
+ *   Who has access: Anyone
+ *
+ * API (CORS-friendly):
+ *   GET  ?action=search&q=หูฟัง&platform=lazada&topN=50
+ *   POST text/plain JSON { action: "select", ...product }
+ *   GET  ?action=select&data=<encodeURIComponent(JSON)>
+ */
+
+var PRODUCT_HEADERS = [
+  'row_id', 'created_at', 'updated_at', 'platform', 'product_id', 'title', 'query',
+  'search_id', 'price', 'original_price', 'discount_pct', 'commission_pct',
+  'commission_amount', 'free_shipping', 'value_score', 'rank', 'selected_by_user',
+  'product_url', 'affiliate_url', 'image_url', 'seller_name', 'category', 'status', 'notes'
+];
+
+var SEARCH_HEADERS = [
+  'search_id', 'created_at', 'platform', 'query', 'results_returned',
+  'top_product_ids', 'source', 'session_id'
+];
+
+var VIDEO_HEADERS = [
+  'Video_ID', 'Platform', 'Video_URL', 'Product_Name', 'Affiliate_Link',
+  'Cart_Status', 'Current_Views', 'Last_Updated'
+];
+
+var CONFIG_HEADERS = ['key', 'value', 'description'];
+
+var DEFAULT_WEIGHTS = {
+  price: 0.35,
+  discount_pct: 0.25,
+  commission: 0.25,
+  free_shipping: 0.15
+};
+
+function doGet(e) {
+  try {
+    var p = (e && e.parameter) || {};
+    var action = String(p.action || 'search').toLowerCase();
+
+    if (action === 'health' || action === 'ping') {
+      return json_({ ok: true, service: 'affiliate-finder-apps-script' });
+    }
+
+    if (action === 'select') {
+      var raw = p.data || p.payload || '';
+      var body = raw ? JSON.parse(decodeURIComponent(raw)) : {};
+      return json_(handleSelect_(body));
+    }
+
+    return json_(handleSearch_({
+      q: p.q || p.query || '',
+      platform: p.platform || '',
+      topN: p.topN || p.top_n || '',
+      session_id: p.session_id || '',
+      persist: p.persist
+    }));
+  } catch (err) {
+    return json_({ error: String(err && err.message ? err.message : err) }, 400);
+  }
+}
+
+function doPost(e) {
+  try {
+    var body = {};
+    if (e && e.postData && e.postData.contents) {
+      var text = String(e.postData.contents);
+      try {
+        body = JSON.parse(text);
+      } catch (parseErr) {
+        // form-urlencoded fallback
+        body = (e.parameter) || {};
+      }
+    } else {
+      body = (e && e.parameter) || {};
+    }
+
+    var action = String(body.action || 'select').toLowerCase();
+    if (action === 'search') {
+      return json_(handleSearch_(body));
+    }
+    return json_(handleSelect_(body));
+  } catch (err) {
+    return json_({ error: String(err && err.message ? err.message : err) }, 400);
+  }
+}
+
+function doOptions() {
+  return ContentService.createTextOutput('')
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+/* -------------------- Search -------------------- */
+
+function handleSearch_(input) {
+  ensureSheets_();
+  var query = String(input.q || input.query || '').trim();
+  var platform = String(input.platform || getConfig_('platform_default', 'lazada')).toLowerCase();
+  var topN = Math.min(Number(input.topN || input.top_n || getConfig_('top_n', '50')) || 50, 50);
+  var persist = String(input.persist == null ? 'true' : input.persist).toLowerCase() !== 'false';
+  var sessionId = String(input.session_id || '');
+
+  if (!query) {
+    throw new Error('ต้องระบุคำค้นหา q');
+  }
+
+  var candidates = findCandidates_(query, platform);
+  var weights = getWeights_();
+  var products = scoreProducts_(candidates, weights).slice(0, topN);
+  products = products.map(function (p) {
+    p.source = 'sheet';
+    return p;
+  });
+
+  var searchId = uuid_();
+  var createdAt = nowIso_();
+
+  if (persist) {
+    appendRow_('searches', SEARCH_HEADERS, {
+      search_id: searchId,
+      created_at: createdAt,
+      platform: platform,
+      query: query,
+      results_returned: products.length,
+      top_product_ids: products.map(function (p) { return p.product_id; }).join('|'),
+      source: 'frontend',
+      session_id: sessionId
+    });
+
+    products.forEach(function (p) {
+      appendRow_('products', PRODUCT_HEADERS, {
+        row_id: uuid_(),
+        created_at: createdAt,
+        updated_at: createdAt,
+        platform: p.platform,
+        product_id: p.product_id,
+        title: p.title,
+        query: query,
+        search_id: searchId,
+        price: p.price,
+        original_price: p.original_price,
+        discount_pct: p.discount_pct,
+        commission_pct: p.commission_pct,
+        commission_amount: p.commission_amount,
+        free_shipping: boolCell_(p.free_shipping),
+        value_score: p.value_score,
+        rank: p.rank,
+        selected_by_user: 'FALSE',
+        product_url: p.product_url,
+        affiliate_url: '',
+        image_url: p.image_url,
+        seller_name: p.seller_name,
+        category: p.category,
+        status: p.status || 'active',
+        notes: 'recommended'
+      });
+    });
+  }
+
+  return {
+    search_id: searchId,
+    query: query,
+    platform: platform,
+    count: products.length,
+    products: products
+  };
+}
+
+/**
+ * ค้นจากชีต products (+ catalog ถ้ามี) ตามคำค้น แล้ว dedupe ตาม product_id
+ */
+function findCandidates_(query, platform) {
+  var tokens = tokenize_(query);
+  var rows = readObjects_('products', PRODUCT_HEADERS);
+
+  var catalogSheet = SpreadsheetApp.getActive().getSheetByName('catalog');
+  if (catalogSheet) {
+    rows = rows.concat(readObjects_('catalog', PRODUCT_HEADERS));
+  }
+
+  var bestById = {};
+  rows.forEach(function (r) {
+    var pPlatform = String(r.platform || '').toLowerCase();
+    if (platform && pPlatform && pPlatform !== platform) return;
+
+    var hay = [
+      r.title, r.query, r.category, r.seller_name, r.product_id, r.notes
+    ].join(' ').toLowerCase();
+
+    if (!tokens.every(function (t) { return hay.indexOf(t) !== -1; })) return;
+
+    var id = String(r.product_id || '').trim();
+    if (!id) return;
+
+    var product = normalizeProduct_(r, platform);
+    var prev = bestById[id];
+    if (!prev || Number(product.price) > 0) {
+      // keep newest / richer row
+      if (!prev || String(r.updated_at || r.created_at) > String(prev._ts || '')) {
+        product._ts = r.updated_at || r.created_at || '';
+        bestById[id] = product;
+      }
+    }
+  });
+
+  return Object.keys(bestById).map(function (k) {
+    var p = bestById[k];
+    delete p._ts;
+    return p;
+  });
+}
+
+function normalizeProduct_(r, platform) {
+  var price = Number(r.price) || 0;
+  var original = Number(r.original_price) || 0;
+  var discount = Number(r.discount_pct);
+  if (!discount && original > price && original > 0) {
+    discount = Number((((original - price) / original) * 100).toFixed(1));
+  }
+  var commissionPct = Number(r.commission_pct) || 0;
+  var commissionAmount = Number(r.commission_amount);
+  if (!commissionAmount && price && commissionPct) {
+    commissionAmount = Number(((price * commissionPct) / 100).toFixed(2));
+  }
+  var productUrl = String(r.product_url || '').trim();
+  var productId = String(r.product_id || '').trim();
+  if (!productUrl && productId) {
+    productUrl = 'https://www.lazada.co.th/products/pdp-i' + productId + '.html';
+  }
+
+  return {
+    platform: String(r.platform || platform || 'lazada').toLowerCase(),
+    product_id: productId,
+    title: String(r.title || ''),
+    price: price,
+    original_price: original,
+    discount_pct: discount || 0,
+    commission_pct: commissionPct,
+    commission_amount: commissionAmount || 0,
+    free_shipping: isTrue_(r.free_shipping),
+    product_url: productUrl,
+    image_url: String(r.image_url || ''),
+    seller_name: String(r.seller_name || ''),
+    category: String(r.category || ''),
+    status: String(r.status || 'active')
+  };
+}
+
+/* -------------------- Select / Affiliate -------------------- */
+
+function handleSelect_(body) {
+  ensureSheets_();
+  body = body || {};
+  var productId = String(body.product_id || '').trim();
+  var title = String(body.title || '').trim();
+  var productUrl = String(body.product_url || '').trim();
+  var platform = String(body.platform || getConfig_('platform_default', 'lazada')).toLowerCase();
+
+  if (!productId || !title || !productUrl) {
+    throw new Error('ต้องมี product_id, title, product_url');
+  }
+
+  var converted = toAffiliateLink_(platform, productUrl, productId);
+  var ts = nowIso_();
+  var rowId = uuid_();
+  var platformLabel =
+    platform === 'shopee' ? 'Shopee' : platform === 'tiktok' ? 'TikTok' : 'Lazada';
+
+  var productRow = {
+    row_id: rowId,
+    created_at: ts,
+    updated_at: ts,
+    platform: platform,
+    product_id: productId,
+    title: title,
+    query: body.query || '',
+    search_id: body.search_id || '',
+    price: body.price != null ? body.price : '',
+    original_price: body.original_price != null ? body.original_price : '',
+    discount_pct: body.discount_pct != null ? body.discount_pct : '',
+    commission_pct: body.commission_pct != null ? body.commission_pct : '',
+    commission_amount: body.commission_amount != null ? body.commission_amount : '',
+    free_shipping: boolCell_(body.free_shipping),
+    value_score: body.value_score != null ? body.value_score : '',
+    rank: body.rank != null ? body.rank : '',
+    selected_by_user: 'TRUE',
+    product_url: productUrl,
+    affiliate_url: converted.affiliateUrl,
+    image_url: body.image_url || '',
+    seller_name: body.seller_name || '',
+    category: body.category || '',
+    status: 'active',
+    notes: 'selected via Apps Script (' + converted.mode + '/' + converted.provider + ')'
+  };
+
+  appendRow_('products', PRODUCT_HEADERS, productRow);
+
+  appendRow_('Video_Monitoring', VIDEO_HEADERS, {
+    Video_ID: 'SEL-' + productId,
+    Platform: platformLabel,
+    Video_URL: productUrl,
+    Product_Name: title,
+    Affiliate_Link: converted.affiliateUrl,
+    Cart_Status: 'ปกติ',
+    Current_Views: 0,
+    Last_Updated: ts.replace('T', ' ').replace('+07:00', '')
+  });
+
+  return {
+    ok: true,
+    row_id: rowId,
+    affiliate_url: converted.affiliateUrl,
+    affiliate_mode: converted.mode,
+    provider: converted.provider,
+    warning: converted.warning || undefined,
+    product: productRow
+  };
+}
+
+function toAffiliateLink_(platform, productUrl, productId) {
+  var cleanUrl = normalizeProductUrl_(productUrl, productId);
+  var p = String(platform || 'lazada').toLowerCase();
+
+  if (p === 'lazada') {
+    var offerCode = String(getConfig_('lazada_offer_code', '')).trim();
+    var memberId = String(getConfig_('lazada_member_id', '')).trim();
+    var subId = String(getConfig_('lazada_sub_id', 'aff-finder')).trim() || 'aff-finder';
+
+    if (offerCode && offerCode !== 'demo-aff') {
+      var u = 'https://c.lazada.co.th/t/c.' + encodeURIComponent(offerCode) +
+        '?url=' + encodeURIComponent(cleanUrl) +
+        (productId ? '&itemId=' + encodeURIComponent(productId) : '') +
+        '&sub_id=' + encodeURIComponent(subId);
+      if (memberId) u += '&aff_id=' + encodeURIComponent(memberId);
+      return {
+        affiliateUrl: u,
+        mode: 'live',
+        provider: 'lazada-offer'
+      };
+    }
+
+    var direct = cleanUrl;
+    var sep = direct.indexOf('?') >= 0 ? '&' : '?';
+    if (memberId) direct += sep + 'laz_aff_id=' + encodeURIComponent(memberId) + '&sub_aff_id=' + encodeURIComponent(subId);
+    else direct += sep + 'sub_aff_id=' + encodeURIComponent(subId);
+
+    return {
+      affiliateUrl: direct,
+      mode: 'live',
+      provider: 'lazada-direct',
+      warning: 'ยังไม่มี lazada_offer_code ในชีต config — ใส่ค่าจาก Lazada Affiliate เพื่อได้ลิงก์ track จริง'
+    };
+  }
+
+  if (p === 'shopee') {
+    var tracking = getConfig_('affiliate_tracking_id', 'demo-aff');
+    var base = getConfig_('shopee_affiliate_base', 'https://s.shopee.co.th/');
+    return {
+      affiliateUrl: base + encodeURIComponent(tracking) + '?url=' + encodeURIComponent(cleanUrl),
+      mode: 'sheet',
+      provider: 'shopee'
+    };
+  }
+
+  return { affiliateUrl: cleanUrl, mode: 'passthrough', provider: p };
+}
+
+function normalizeProductUrl_(productUrl, productId) {
+  var raw = String(productUrl || '').trim();
+  if (/^https?:\/\/(www\.)?lazada\.co\.th\//i.test(raw) && /i\d+/i.test(raw)) {
+    return raw.split('?')[0];
+  }
+  if (productId && /^\d+$/.test(String(productId))) {
+    return 'https://www.lazada.co.th/products/pdp-i' + productId + '.html';
+  }
+  return raw;
+}
+
+/* -------------------- Scoring -------------------- */
+
+function scoreProducts_(products, weights) {
+  weights = weights || DEFAULT_WEIGHTS;
+  if (!products.length) return [];
+
+  var prices = products.map(function (p) { return Number(p.price) || 0; });
+  var discounts = products.map(function (p) { return Number(p.discount_pct) || 0; });
+  var commissions = products.map(function (p) { return Number(p.commission_pct) || 0; });
+
+  var minPrice = Math.min.apply(null, prices);
+  var maxPrice = Math.max.apply(null, prices);
+  var minDisc = Math.min.apply(null, discounts);
+  var maxDisc = Math.max.apply(null, discounts);
+  var minComm = Math.min.apply(null, commissions);
+  var maxComm = Math.max.apply(null, commissions);
+
+  function normHigh(v, min, max) {
+    return max === min ? 100 : ((v - min) / (max - min)) * 100;
+  }
+  function normLow(v, min, max) {
+    return max === min ? 100 : ((max - v) / (max - min)) * 100;
+  }
+
+  var scored = products.map(function (p) {
+    var priceScore = normLow(Number(p.price) || 0, minPrice, maxPrice);
+    var discountScore = normHigh(Number(p.discount_pct) || 0, minDisc, maxDisc);
+    var commissionScore = normHigh(Number(p.commission_pct) || 0, minComm, maxComm);
+    var shipScore = p.free_shipping ? 100 : 0;
+    var value_score = Number((
+      weights.price * priceScore +
+      weights.discount_pct * discountScore +
+      weights.commission * commissionScore +
+      weights.free_shipping * shipScore
+    ).toFixed(1));
+    var out = {};
+    Object.keys(p).forEach(function (k) { out[k] = p[k]; });
+    out.value_score = value_score;
+    return out;
+  });
+
+  scored.sort(function (a, b) { return b.value_score - a.value_score; });
+  return scored.map(function (p, i) {
+    p.rank = i + 1;
+    return p;
+  });
+}
+
+function getWeights_() {
+  return {
+    price: Number(getConfig_('weight_price', DEFAULT_WEIGHTS.price)),
+    discount_pct: Number(getConfig_('weight_discount_pct', DEFAULT_WEIGHTS.discount_pct)),
+    commission: Number(getConfig_('weight_commission', DEFAULT_WEIGHTS.commission)),
+    free_shipping: Number(getConfig_('weight_free_shipping', DEFAULT_WEIGHTS.free_shipping))
+  };
+}
+
+/* -------------------- Sheet helpers -------------------- */
+
+function ensureSheets_() {
+  ensureSheet_('products', PRODUCT_HEADERS);
+  ensureSheet_('searches', SEARCH_HEADERS);
+  ensureSheet_('Video_Monitoring', VIDEO_HEADERS);
+  var config = ensureSheet_('config', CONFIG_HEADERS);
+  seedConfig_(config);
+}
+
+function ensureSheet_(name, headers) {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+  } else {
+    var existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), headers.length)).getValues()[0];
+    var needHeaders = !existing || !existing[0];
+    if (needHeaders) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    }
+  }
+  return sheet;
+}
+
+function seedConfig_(sheet) {
+  var map = readConfigMap_();
+  var seeds = [
+    ['platform_default', 'lazada', 'แพลตฟอร์มเริ่มต้น'],
+    ['top_n', '50', 'จำนวนสินค้าคุ้มค่าที่คืนต่อคำค้น'],
+    ['weight_price', '0.35', 'น้ำหนักคะแนนราคาถูก'],
+    ['weight_discount_pct', '0.25', 'น้ำหนักคะแนนส่วนลด %'],
+    ['weight_commission', '0.25', 'น้ำหนักคะแนนค่าคอม'],
+    ['weight_free_shipping', '0.15', 'น้ำหนักคะแนนส่งฟรี'],
+    ['currency', 'THB', 'สกุลเงิน'],
+    ['lazada_offer_code', '', 'รหัส offer จาก Lazada Affiliate (c.lazada.co.th/t/c.XXX)'],
+    ['lazada_member_id', '', 'Affiliate member id'],
+    ['lazada_sub_id', 'aff-finder', 'sub_id สำหรับ track']
+  ];
+  var toAdd = [];
+  seeds.forEach(function (row) {
+    if (!(row[0] in map)) toAdd.push(row);
+  });
+  if (toAdd.length) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, toAdd.length, 3).setValues(toAdd);
+  }
+}
+
+function readConfigMap_() {
+  var sheet = SpreadsheetApp.getActive().getSheetByName('config');
+  var map = {};
+  if (!sheet || sheet.getLastRow() < 2) return map;
+  var values = sheet.getRange(2, 1, sheet.getLastRow(), 2).getValues();
+  values.forEach(function (row) {
+    if (row[0]) map[String(row[0])] = String(row[1] == null ? '' : row[1]);
+  });
+  return map;
+}
+
+function getConfig_(key, fallback) {
+  var map = readConfigMap_();
+  if (key in map && map[key] !== '') return map[key];
+  return fallback;
+}
+
+function readObjects_(sheetName, headers) {
+  var sheet = SpreadsheetApp.getActive().getSheetByName(sheetName);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  var width = Math.max(sheet.getLastColumn(), headers.length);
+  var values = sheet.getRange(1, 1, sheet.getLastRow(), width).getValues();
+  var head = values[0].map(function (h) { return String(h || '').trim(); });
+  var out = [];
+  for (var i = 1; i < values.length; i++) {
+    var row = values[i];
+    if (!row.join('')) continue;
+    var obj = {};
+    headers.forEach(function (h) {
+      var idx = head.indexOf(h);
+      obj[h] = idx >= 0 ? row[idx] : '';
+    });
+    out.push(obj);
+  }
+  return out;
+}
+
+function appendRow_(sheetName, headers, obj) {
+  var sheet = ensureSheet_(sheetName, headers);
+  var row = headers.map(function (h) {
+    return obj[h] != null ? obj[h] : '';
+  });
+  sheet.appendRow(row);
+}
+
+/* -------------------- Utils -------------------- */
+
+function json_(obj, optStatus) {
+  // ContentService cannot set HTTP status reliably for web apps; embed error in body.
+  var out = ContentService.createTextOutput(JSON.stringify(obj));
+  out.setMimeType(ContentService.MimeType.JSON);
+  return out;
+}
+
+function nowIso_() {
+  return Utilities.formatDate(new Date(), 'Asia/Bangkok', "yyyy-MM-dd'T'HH:mm:ss'+07:00'");
+}
+
+function uuid_() {
+  return Utilities.getUuid();
+}
+
+function boolCell_(v) {
+  return isTrue_(v) ? 'TRUE' : 'FALSE';
+}
+
+function isTrue_(v) {
+  if (v === true || v === 1) return true;
+  var s = String(v == null ? '' : v).trim().toUpperCase();
+  return s === 'TRUE' || s === '1' || s === 'YES';
+}
+
+function tokenize_(query) {
+  return String(query || '')
+    .toLowerCase()
+    .split(/[\s,;/|]+/)
+    .map(function (t) { return t.trim(); })
+    .filter(function (t) { return t.length > 0; });
+}
+
+/**
+ * เมนูช่วยใน Sheet: รันครั้งเดียวเพื่อสร้างหัวตาราง + config
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Affiliate Finder')
+    .addItem('เตรียมชีต (headers + config)', 'ensureSheets_')
+    .addToUi();
+}
