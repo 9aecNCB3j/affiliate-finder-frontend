@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ค้นหาสินค้าคุ้มค่า · Lazada Affiliate</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=Syne:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <header class="top">
+      <div class="brand">
+        <span class="brand-mark">AF</span>
+        <div>
+          <p class="brand-name">Affiliate Finder</p>
+          <p class="brand-sub">Lazada · จัดอันดับสูงสุด 50 รายการ</p>
+        </div>
+      </div>
+      <nav class="top-nav">
+        <a href="./" aria-current="page">ค้นหา</a>
+      </nav>
+    </header>
+
+    <main class="shell">
+      <section class="search-panel">
+        <h1>ค้นหาสินค้าที่คุ้มค่าที่สุด</h1>
+        <p class="lead">
+          พิมพ์คำค้น ระบบคัดสูงสุด 50 รายการจากราคา ส่วนลด ค่าคอม และส่งฟรี
+        </p>
+        <form id="search-form" class="search-form">
+          <input
+            id="query"
+            name="q"
+            type="search"
+            placeholder="เช่น หูฟังบลูทูธ, พาวเวอร์แบงก์"
+            autocomplete="off"
+            required
+          />
+          <button type="submit" id="search-btn">ค้นหา</button>
+        </form>
+        <p id="status" class="status" role="status"></p>
+      </section>
+
+      <section id="selected" class="selected hidden" aria-live="polite">
+        <h2>ลิงก์ Affiliate ของคุณ</h2>
+        <div id="selected-body"></div>
+      </section>
+
+      <section id="results" class="results" aria-live="polite"></section>
+    </main>
+
+    <script src="./config.js"></script>
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
