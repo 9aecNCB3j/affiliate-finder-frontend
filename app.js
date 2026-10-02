@@ -44,6 +44,15 @@ function setStatus(text) {
   statusEl.textContent = text || '';
 }
 
+function productImageSrc(p) {
+  const url = String(p?.image_url || '').trim();
+  if (!url) return '';
+  if (/lazcdn\.com/i.test(url)) {
+    return url.replace(/_\d+x\d+q\d+\.jpg/i, '_320x320q80.jpg');
+  }
+  return url;
+}
+
 function priceHtml(p) {
   const price = Number(p.price) || 0;
   const original = Number(p.original_price) || 0;
@@ -60,7 +69,7 @@ function renderProducts(products) {
     .map(
       (p) => `
       <article class="product" data-id="${p.product_id}">
-        <img src="${p.image_url}" alt="" loading="lazy" />
+        <img src="${escapeHtml(productImageSrc(p))}" alt="" loading="lazy" decoding="async" />
         <div>
           <h3>${escapeHtml(p.title)}</h3>
           <div class="meta">

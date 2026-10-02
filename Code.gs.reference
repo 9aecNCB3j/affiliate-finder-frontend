@@ -109,11 +109,12 @@ function handleSearch_(input) {
     throw new Error('ต้องระบุคำค้นหา q');
   }
 
-  // 1) จากชีต  2) ถ้าไม่พอ → สร้างคลังตามคำค้น (เหมือน mock ของระบบเดิม)
-  //    เพื่อให้พิมพ์คำไหนก็ได้ Top 50 + แปลง Affiliate ได้โดยไม่พึ่ง Node scrape
+  // 1) ชีต  2) Lazada จริง (ผ่าน catalog proxy / Node+Playwright ถ้ามี)  3) คลัง fallback + รูปสินค้า
   var candidates = findCandidates_(query, platform);
+  if (platform === 'lazada' && candidates.length < topN) {
+    candidates = mergeCandidates_(candidates, fetchCatalogProxy_(query, Math.max(topN, 50)));
+  }
   if (candidates.length < topN) {
-    // ใช้คลังสร้างใหม่เป็นหลักเมื่อชีตยังไม่พอ — กัน product_id ซ้ำจากรอบก่อนแล้วได้ไม่ครบ topN
     candidates = generateCatalog_(query, platform, Math.max(topN, 50));
   }
 
@@ -199,8 +200,133 @@ var CATALOG_SEED_ = [
   { base: 'กระเป๋าเป้กันน้ำ', category: 'Fashion', seller: 'PackGo' },
   { base: 'ครีมกันแดด SPF50', category: 'Beauty', seller: 'SkinCare TH' },
   { base: 'วิตามินซีเม็ดเคี้ยว', category: 'Health', seller: 'HealthPlus' },
-  { base: 'สายรัดข้อมือ Smart Band', category: 'Electronics', seller: 'WearTech' }
+  { base: 'สายรัดข้อมือ Smart Band', category: 'Electronics', seller: 'WearTech' },
+  { base: 'พัดลมตั้งโต๊ะ 16 นิ้ว', category: 'Home', seller: 'CoolBreeze TH' },
+  { base: 'พัดลม USB พกพา', category: 'Home', seller: 'AirFlow Shop' }
 ];
+
+/** รูปสินค้า fallback (เมื่อไม่มี lazada-live) — ใช้ Unsplash แทน placehold */
+var IMAGE_POOLS_ = {
+  shoes: [
+    'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1460353581641-37baddab0fa2?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1525966220533-0102b4b8708c?w=320&h=320&fit=crop'
+  ],
+  fan: [
+    'https://images.unsplash.com/photo-1585771724684-38269b663951?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1625869016776-94be63176578?w=320&h=320&fit=crop'
+  ],
+  Electronics: [
+    'https://images.unsplash.com/photo-1593642632823-8f785ba67e45?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1572569511254-d8f925fe2cbb?w=320&h=320&fit=crop'
+  ],
+  Fashion: [
+    'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=320&h=320&fit=crop'
+  ],
+  Home: [
+    'https://images.unsplash.com/photo-1556911220-bff31c812dba?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1585771724684-38269b663951?w=320&h=320&fit=crop'
+  ],
+  Beauty: [
+    'https://images.unsplash.com/photo-1556228720-195a672e8a03?w=320&h=320&fit=crop'
+  ],
+  Health: [
+    'https://images.unsplash.com/photo-1584308664954-24d5c474f2ae?w=320&h=320&fit=crop'
+  ],
+  Accessories: [
+    'https://images.unsplash.com/photo-1609091839311-9d67056b9b7f?w=320&h=320&fit=crop'
+  ],
+  General: [
+    'https://images.unsplash.com/photo-1472851297630-3b8a6e0c2c3f?w=320&h=320&fit=crop'
+  ]
+};
+
+function getCatalogProxyBase_() {
+  var map = readConfigMap_();
+  if ('catalog_proxy_base' in map) {
+    var configured = String(map.catalog_proxy_base || '').trim();
+    if (!configured || configured === 'off' || configured === 'false') return '';
+    return configured.replace(/\/$/, '');
+  }
+  // ค่าเริ่มต้นเมื่อยังไม่ตั้งใน config — ต้องรัน Node + tunnel (ดู README)
+  return 'https://hosts-coupons-epic-aud.trycloudflare.com';
+}
+
+/**
+ * ดึงสินค้าจริง Lazada (มีรูป lazcdn) ผ่าน Express /api/search บนเครื่องที่รัน Playwright
+ */
+function fetchCatalogProxy_(query, limit) {
+  var base = getCatalogProxyBase_();
+  if (!base) return [];
+
+  var want = Math.min(Math.max(1, Number(limit) || 50), 50);
+  var url = base + '/api/search?q=' + encodeURIComponent(String(query || '')) +
+    '&platform=lazada&topN=' + want + '&persist=false';
+
+  try {
+    var resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      validateHttpsCertificates: true
+    });
+    if (resp.getResponseCode() >= 400) return [];
+
+    var data = JSON.parse(resp.getContentText());
+    if (data.error) return [];
+
+    return (data.products || []).map(function (raw) {
+      var p = normalizeProduct_(raw, 'lazada');
+      p.source = String(raw.source || 'lazada-live');
+      p.image_url = normalizeProductImageUrl_(p.image_url);
+      return p;
+    }).filter(function (p) {
+      return p.product_id && p.title;
+    });
+  } catch (err) {
+    return [];
+  }
+}
+
+function mergeCandidates_(existing, extra) {
+  var seen = {};
+  var out = [];
+  (existing || []).forEach(function (p) {
+    if (!p || !p.product_id) return;
+    seen[p.product_id] = true;
+    out.push(p);
+  });
+  (extra || []).forEach(function (p) {
+    if (!p || !p.product_id || seen[p.product_id]) return;
+    seen[p.product_id] = true;
+    out.push(p);
+  });
+  return out;
+}
+
+function normalizeProductImageUrl_(url) {
+  var u = String(url || '').trim();
+  if (!u) return u;
+  if (/placehold\.co/i.test(u)) return u;
+  if (/lazcdn\.com/i.test(u)) {
+    u = u.replace(/_\d+x\d+q\d+\.jpg/i, '_320x320q80.jpg');
+    if (!/_\d+x\d+/i.test(u) && /\.jpg$/i.test(u)) {
+      u = u.replace(/\.jpg$/i, '_320x320q80.jpg');
+    }
+  }
+  return u;
+}
+
+function catalogImageFor_(query, item, seed, idx) {
+  var hay = (String(query || '') + ' ' + String(item.base || '')).toLowerCase();
+  var pool;
+  if (/รองเท้|sneaker|shoe|ผ้าใบ/.test(hay)) pool = IMAGE_POOLS_.shoes;
+  else if (/พัดลม|fan|ตั้งโต๊ะ/.test(hay)) pool = IMAGE_POOLS_.fan;
+  else pool = IMAGE_POOLS_[item.category] || IMAGE_POOLS_.General;
+  if (!pool || !pool.length) pool = IMAGE_POOLS_.General;
+  return pool[pickInt_(seed, idx + 11, 0, pool.length - 1)];
+}
 
 function hashSeed_(input) {
   var raw = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(input), Utilities.Charset.UTF_8);
@@ -256,7 +382,7 @@ function generateCatalog_(query, platform, limitPool) {
       commission_amount: Number(((price * commission_pct) / 100).toFixed(2)),
       free_shipping: free_shipping,
       product_url: 'https://www.lazada.co.th/products/pdp-i' + product_id + '.html',
-      image_url: 'https://placehold.co/320x320/png?text=' + encodeURIComponent(String(titleBase).slice(0, 12)),
+      image_url: catalogImageFor_(query, item, seed, idx),
       seller_name: item.seller,
       category: item.category,
       status: 'active',
@@ -339,7 +465,7 @@ function normalizeProduct_(r, platform) {
     commission_amount: commissionAmount || 0,
     free_shipping: isTrue_(r.free_shipping),
     product_url: productUrl,
-    image_url: String(r.image_url || ''),
+    image_url: normalizeProductImageUrl_(String(r.image_url || '')),
     seller_name: String(r.seller_name || ''),
     category: String(r.category || ''),
     status: String(r.status || 'active'),
@@ -578,7 +704,8 @@ function seedConfig_(sheet) {
     ['currency', 'THB', 'สกุลเงิน'],
     ['lazada_offer_code', '', 'รหัส offer จาก Lazada Affiliate (c.lazada.co.th/t/c.XXX)'],
     ['lazada_member_id', '', 'Affiliate member id'],
-    ['lazada_sub_id', 'aff-finder', 'sub_id สำหรับ track']
+    ['lazada_sub_id', 'aff-finder', 'sub_id สำหรับ track'],
+    ['catalog_proxy_base', 'https://hosts-coupons-epic-aud.trycloudflare.com', 'URL Node /api สำหรับดึงสินค้า+รูป Lazada จริง (ว่าง/off = ปิด)']
   ];
   var toAdd = [];
   seeds.forEach(function (row) {
