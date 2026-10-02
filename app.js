@@ -4,6 +4,10 @@ const API_BASE = String(window.AFFILIATE_API_BASE || '')
 
 const IS_APPS_SCRIPT = /script\.google\.com/i.test(API_BASE);
 
+const CATALOG_PROXY = String(window.CATALOG_PROXY_BASE || '')
+  .trim()
+  .replace(/\/$/, '');
+
 const form = document.getElementById('search-form');
 const queryInput = document.getElementById('query');
 const statusEl = document.getElementById('status');
@@ -12,19 +16,72 @@ const selectedEl = document.getElementById('selected');
 const selectedBody = document.getElementById('selected-body');
 const searchBtn = document.getElementById('search-btn');
 
+const PAGE_SIZE = 10;
+
 let lastSearchId = '';
 let lastQuery = '';
+let lastProducts = [];
+let currentPage = 1;
+let lastResultMeta = null;
 
-function searchUrl(q) {
+function searchUrl(q, opts = {}) {
+  const topN = opts.topN ?? 50;
+  const persist = opts.persist ?? true;
   if (IS_APPS_SCRIPT) {
     const u = new URL(API_BASE);
     u.searchParams.set('action', 'search');
     u.searchParams.set('q', q);
     u.searchParams.set('platform', 'lazada');
-    u.searchParams.set('topN', '50');
+    u.searchParams.set('topN', String(topN));
+    if (!persist) u.searchParams.set('persist', 'false');
     return u.toString();
   }
-  return `${API_BASE}/api/search?q=${encodeURIComponent(q)}&platform=lazada&topN=50`;
+  const u = new URL(`${API_BASE}/api/search`);
+  u.searchParams.set('q', q);
+  u.searchParams.set('platform', 'lazada');
+  u.searchParams.set('topN', String(topN));
+  if (!persist) u.searchParams.set('persist', 'false');
+  return u.toString();
+}
+
+function catalogProxySearchUrl(q) {
+  const u = new URL(`${CATALOG_PROXY}/api/search`);
+  u.searchParams.set('q', q);
+  u.searchParams.set('platform', 'lazada');
+  u.searchParams.set('topN', '50');
+  u.searchParams.set('persist', 'false');
+  return u.toString();
+}
+
+function hasRealProductImage(p) {
+  const url = String(p?.image_url || '').trim();
+  if (!url || /placehold\.co/i.test(url) || /unsplash\.com/i.test(url)) return false;
+  return /lazcdn\.com/i.test(url);
+}
+
+async function fetchSearchResults(q) {
+  if (CATALOG_PROXY) {
+    try {
+      const res = await fetch(catalogProxySearchUrl(q));
+      const data = await res.json();
+      const products = data.products || [];
+      const liveOk =
+        !data.error &&
+        products.length >= 3 &&
+        products.some((p) => p.source === 'lazada-live' && hasRealProductImage(p));
+      if (liveOk) {
+        return { ...data, searchVia: 'catalog-proxy' };
+      }
+    } catch {
+      /* ใช้ Apps Script ต่อ */
+    }
+  }
+
+  const res = await fetch(searchUrl(q), { redirect: 'follow' });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  if (!res.ok) throw new Error(data.error || 'ค้นหาไม่สำเร็จ');
+  return { ...data, searchVia: 'apps-script' };
 }
 
 function selectUrl() {
@@ -46,11 +103,17 @@ function setStatus(text) {
 
 function productImageSrc(p) {
   const url = String(p?.image_url || '').trim();
-  if (!url) return '';
+  if (!url || /placehold\.co/i.test(url) || /unsplash\.com/i.test(url)) return '';
   if (/lazcdn\.com/i.test(url)) {
     return url.replace(/_\d+x\d+q\d+\.jpg/i, '_320x320q80.jpg');
   }
-  return url;
+  return '';
+}
+
+function productThumbHtml(p) {
+  const src = productImageSrc(p);
+  if (!src) return '<div class="thumb-empty" aria-hidden="true"></div>';
+  return `<img src="${escapeHtml(src)}" alt="" loading="lazy" decoding="async" />`;
 }
 
 function priceHtml(p) {
@@ -64,12 +127,14 @@ function priceHtml(p) {
     </span>`;
 }
 
-function renderProducts(products) {
-  resultsEl.innerHTML = products
-    .map(
-      (p) => `
+function totalPages_() {
+  return Math.max(1, Math.ceil(lastProducts.length / PAGE_SIZE));
+}
+
+function productCardHtml(p) {
+  return `
       <article class="product" data-id="${p.product_id}">
-        <img src="${escapeHtml(productImageSrc(p))}" alt="" loading="lazy" decoding="async" />
+        ${productThumbHtml(p)}
         <div>
           <h3>${escapeHtml(p.title)}</h3>
           <div class="meta">
@@ -82,9 +147,60 @@ function renderProducts(products) {
           </div>
         </div>
         <button type="button" data-select='${escapeAttr(JSON.stringify(p))}'>เลือก & แปลงลิงก์</button>
-      </article>`
-    )
-    .join('');
+      </article>`;
+}
+
+function paginationHtml(page, pages, total) {
+  if (pages <= 1) return '';
+  const from = (page - 1) * PAGE_SIZE + 1;
+  const to = Math.min(page * PAGE_SIZE, total);
+  const prevDisabled = page <= 1 ? ' disabled' : '';
+  const nextDisabled = page >= pages ? ' disabled' : '';
+
+  let pageButtons = '';
+  for (let i = 1; i <= pages; i += 1) {
+    const current = i === page ? ' aria-current="page"' : '';
+    pageButtons += `<button type="button" class="pager-num" data-page="${i}"${current}>${i}</button>`;
+  }
+
+  return `
+    <nav class="results-pager" aria-label="เปลี่ยนหน้ารายการสินค้า">
+      <p class="pager-summary">แสดง ${from}–${to} จาก ${total} รายการ · หน้า ${page}/${pages}</p>
+      <div class="pager-controls">
+        <button type="button" class="pager-prev" data-page="${page - 1}"${prevDisabled} aria-label="หน้าก่อน">ก่อนหน้า</button>
+        <div class="pager-nums">${pageButtons}</div>
+        <button type="button" class="pager-next" data-page="${page + 1}"${nextDisabled} aria-label="หน้าถัดไป">ถัดไป</button>
+      </div>
+    </nav>`;
+}
+
+function renderResultsView() {
+  const pages = totalPages_();
+  if (currentPage > pages) currentPage = pages;
+  if (currentPage < 1) currentPage = 1;
+
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const slice = lastProducts.slice(start, start + PAGE_SIZE);
+  const listHtml = slice.map((p) => productCardHtml(p)).join('');
+
+  resultsEl.innerHTML = `
+    <div class="results-list">${listHtml}</div>
+    ${paginationHtml(currentPage, pages, lastProducts.length)}
+  `;
+
+  if (lastResultMeta?.count) {
+    refreshStatusWithPage_();
+  }
+}
+
+function refreshStatusWithPage_() {
+  const { query, count, srcLabel, savedNote } = lastResultMeta;
+  const pages = totalPages_();
+  const from = (currentPage - 1) * PAGE_SIZE + 1;
+  const to = Math.min(currentPage * PAGE_SIZE, count);
+  setStatus(
+    `พบ Top ${count} รายการสำหรับ “${query}” · ${srcLabel} · ${savedNote} · แสดง ${from}–${to} (หน้า ${currentPage}/${pages}) — กดเลือกเพื่อได้ลิงก์ Affiliate`
+  );
 }
 
 function escapeHtml(s) {
@@ -134,34 +250,50 @@ form.addEventListener('submit', async (e) => {
   }
 
   searchBtn.disabled = true;
-  setStatus('กำลังค้นหาและจัดอันดับคุ้มค่าจาก Google Sheet…');
+  setStatus(
+    CATALOG_PROXY
+      ? 'กำลังดึงสินค้า Lazada (รูปจริง)…'
+      : 'กำลังค้นหาและจัดอันดับคุ้มค่าจาก Google Sheet…'
+  );
   selectedEl.classList.add('hidden');
   resultsEl.innerHTML = '';
+  lastProducts = [];
+  currentPage = 1;
+  lastResultMeta = null;
+  lastQuery = q;
 
   try {
-    const res = await fetch(searchUrl(q), { redirect: 'follow' });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    if (!res.ok) throw new Error(data.error || 'ค้นหาไม่สำเร็จ');
+    const data = await fetchSearchResults(q);
 
     lastSearchId = data.search_id;
-    lastQuery = data.query;
-    renderProducts(data.products || []);
+    lastQuery = data.query || q;
+    lastProducts = data.products || [];
+    currentPage = 1;
+
     const src = data.products?.[0]?.source || 'catalog';
     const srcLabel =
-      src === 'sheet'
-        ? 'Google Sheet'
-        : src === 'lazada-live'
-          ? 'สินค้าจริง Lazada'
+      data.searchVia === 'catalog-proxy' || src === 'lazada-live'
+        ? 'สินค้าจริง Lazada'
+        : src === 'sheet'
+          ? 'Google Sheet'
           : src === 'catalog'
             ? 'จัดอันดับคุ้มค่า'
             : src;
+    const savedNote =
+      data.searchVia === 'catalog-proxy'
+        ? 'เลือกสินค้าแล้วบันทึกลง Sheet ตอนแปลงลิงก์'
+        : 'บันทึก Sheet แล้ว';
+
     if (!data.count) {
-      setStatus(`ไม่พบสินค้าสำหรับ “${data.query}”`);
+      setStatus(`ไม่พบสินค้าสำหรับ “${lastQuery}”`);
     } else {
-      setStatus(
-        `พบ Top ${data.count} รายการสำหรับ “${data.query}” · ${srcLabel} · บันทึก Sheet แล้ว — กดเลือกเพื่อได้ลิงก์ Affiliate`
-      );
+      lastResultMeta = {
+        query: lastQuery,
+        count: data.count,
+        srcLabel,
+        savedNote,
+      };
+      renderResultsView();
     }
   } catch (err) {
     setStatus(err.message || 'เชื่อมต่อ Apps Script ไม่ได้');
@@ -171,6 +303,18 @@ form.addEventListener('submit', async (e) => {
 });
 
 resultsEl.addEventListener('click', async (e) => {
+  const pageBtn = e.target.closest('button[data-page]');
+  if (pageBtn && !pageBtn.disabled) {
+    const page = Number(pageBtn.getAttribute('data-page'));
+    const pages = totalPages_();
+    if (page >= 1 && page <= pages && page !== currentPage) {
+      currentPage = page;
+      renderResultsView();
+      resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    return;
+  }
+
   const btn = e.target.closest('button[data-select]');
   if (!btn) return;
   if (!API_BASE) {
