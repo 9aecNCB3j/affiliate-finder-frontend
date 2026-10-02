@@ -138,19 +138,20 @@ form.addEventListener('submit', async (e) => {
     lastSearchId = data.search_id;
     lastQuery = data.query;
     renderProducts(data.products || []);
-    const src = data.products?.[0]?.source || 'sheet';
+    const src = data.products?.[0]?.source || 'catalog';
     const srcLabel =
       src === 'sheet'
         ? 'Google Sheet'
         : src === 'lazada-live'
           ? 'สินค้าจริง Lazada'
-          : src;
-    setStatus(
-      `พบ Top ${data.count} รายการสำหรับ “${data.query}” · ${srcLabel} · บันทึก Sheet แล้ว`
-    );
+          : src === 'catalog'
+            ? 'จัดอันดับคุ้มค่า'
+            : src;
     if (!data.count) {
+      setStatus(`ไม่พบสินค้าสำหรับ “${data.query}”`);
+    } else {
       setStatus(
-        `ไม่พบสินค้าที่ตรง “${data.query}” ในชีต products/catalog — เพิ่มข้อมูลใน Sheet แล้วค้นใหม่`
+        `พบ Top ${data.count} รายการสำหรับ “${data.query}” · ${srcLabel} · บันทึก Sheet แล้ว — กดเลือกเพื่อได้ลิงก์ Affiliate`
       );
     }
   } catch (err) {

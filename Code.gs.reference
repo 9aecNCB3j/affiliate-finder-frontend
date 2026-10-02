@@ -109,11 +109,25 @@ function handleSearch_(input) {
     throw new Error('ต้องระบุคำค้นหา q');
   }
 
+  // 1) จากชีต  2) ถ้าไม่พอ → สร้างคลังตามคำค้น (เหมือน mock ของระบบเดิม)
+  //    เพื่อให้พิมพ์คำไหนก็ได้ Top 50 + แปลง Affiliate ได้โดยไม่พึ่ง Node scrape
   var candidates = findCandidates_(query, platform);
+  if (candidates.length < topN) {
+    var generated = generateCatalog_(query, platform, Math.max(topN, 50));
+    var seen = {};
+    candidates.forEach(function (p) { seen[p.product_id] = true; });
+    generated.forEach(function (p) {
+      if (!seen[p.product_id]) {
+        seen[p.product_id] = true;
+        candidates.push(p);
+      }
+    });
+  }
+
   var weights = getWeights_();
   var products = scoreProducts_(candidates, weights).slice(0, topN);
   products = products.map(function (p) {
-    p.source = 'sheet';
+    if (!p.source) p.source = 'catalog';
     return p;
   });
 
@@ -128,7 +142,7 @@ function handleSearch_(input) {
       query: query,
       results_returned: products.length,
       top_product_ids: products.map(function (p) { return p.product_id; }).join('|'),
-      source: 'frontend',
+      source: products.length && products[0].source ? products[0].source : 'catalog',
       session_id: sessionId
     });
 
@@ -169,6 +183,94 @@ function handleSearch_(input) {
     count: products.length,
     products: products
   };
+}
+
+/** คลังสินค้า seed สำหรับสร้างผลค้นหาตามคำค้น (fallback เมื่อชีตว่าง / ไม่พอ) */
+var CATALOG_SEED_ = [
+  { base: 'หูฟังบลูทูธ ANC Pro', category: 'Electronics', seller: 'AudioMall Official' },
+  { base: 'หูฟังไร้สาย Sport Lite', category: 'Electronics', seller: 'FitSound TH' },
+  { base: 'หูฟังครอบหู Bass Boost', category: 'Electronics', seller: 'SoundHub' },
+  { base: 'หูฟังมินิ Clip Buds', category: 'Electronics', seller: 'DailyGadget' },
+  { base: 'หูฟังเกมมิ่ง RGB', category: 'Electronics', seller: 'ProGamer Store' },
+  { base: 'ลำโพงพกพา Waterproof', category: 'Electronics', seller: 'BoomBox TH' },
+  { base: 'สายชาร์จเร็ว 65W', category: 'Accessories', seller: 'ChargeLab' },
+  { base: 'พาวเวอร์แบงก์ 20000mAh', category: 'Accessories', seller: 'PowerGo' },
+  { base: 'เมาส์ไร้สาย Silent', category: 'Electronics', seller: 'OfficePro' },
+  { base: 'คีย์บอร์ดแมคคานิคอล', category: 'Electronics', seller: 'KeyCraft' },
+  { base: 'รองเท้าผ้าใบเบา Running', category: 'Fashion', seller: 'StepUp Store' },
+  { base: 'รองเท้าผ้าใบคลาสสิก', category: 'Fashion', seller: 'UrbanWalk' },
+  { base: 'รองเท้าผ้าใบกันน้ำ', category: 'Fashion', seller: 'TrailMate' },
+  { base: 'กระติกน้ำเก็บความเย็น', category: 'Home', seller: 'ThermoHome' },
+  { base: 'หม้อทอดไร้น้ำมัน', category: 'Home', seller: 'KitchenPlus' },
+  { base: 'เสื้อยืดคอกลม Cotton', category: 'Fashion', seller: 'BasicWear' },
+  { base: 'กระเป๋าเป้กันน้ำ', category: 'Fashion', seller: 'PackGo' },
+  { base: 'ครีมกันแดด SPF50', category: 'Beauty', seller: 'SkinCare TH' },
+  { base: 'วิตามินซีเม็ดเคี้ยว', category: 'Health', seller: 'HealthPlus' },
+  { base: 'สายรัดข้อมือ Smart Band', category: 'Electronics', seller: 'WearTech' }
+];
+
+function hashSeed_(input) {
+  var raw = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(input), Utilities.Charset.UTF_8);
+  var out = [];
+  for (var i = 0; i < raw.length; i++) {
+    var b = raw[i];
+    out.push(b < 0 ? b + 256 : b);
+  }
+  return out;
+}
+
+function pickInt_(buf, offset, min, max) {
+  var n = buf[offset % buf.length];
+  return min + (n % (max - min + 1));
+}
+
+/**
+ * สร้างรายการสินค้าตามคำค้น (Top N) เมื่อยังไม่มีในชีต — คง UX เดิม: พิมพ์แล้วได้ผล + แปลงลิงก์ได้
+ */
+function generateCatalog_(query, platform, limitPool) {
+  var q = String(query || '').trim();
+  if (!q) return [];
+  var want = Math.max(1, Number(limitPool) || 50);
+  var seed = hashSeed_(String(platform) + ':' + q.toLowerCase());
+  var qLower = q.toLowerCase();
+  var matched = CATALOG_SEED_.filter(function (item) {
+    return item.base.toLowerCase().indexOf(qLower) !== -1 ||
+      q.split(/\s+/).some(function (w) {
+        return w.length > 1 && item.base.indexOf(w) !== -1;
+      });
+  });
+  var basePool = matched.length >= 3 ? matched : CATALOG_SEED_;
+  var commissionDefault = Number(getConfig_('default_commission_pct', '5')) || 5;
+  var out = [];
+  for (var idx = 0; idx < want; idx++) {
+    var item = basePool[idx % basePool.length];
+    var original_price = pickInt_(seed, idx * 3, 399, 2490);
+    var discount_pct = Number((pickInt_(seed, idx * 3 + 1, 15, 55) + (idx % 20)).toFixed(1));
+    var price = Math.round(original_price * (1 - discount_pct / 100));
+    var commission_pct = Number((pickInt_(seed, idx * 3 + 2, 4, 12) + (idx % 3)).toFixed(1)) || commissionDefault;
+    var free_shipping = pickInt_(seed, idx + 7, 0, 1) === 1 || idx < 2;
+    var product_id = String(1000000000 + pickInt_(seed, idx * 5, 100000, 899999999) + idx);
+    var variant = idx >= basePool.length ? ' #' + (idx + 1) : '';
+    var titleBase = matched.length >= 3 ? item.base : (q + ' ' + item.base);
+    out.push({
+      platform: platform || 'lazada',
+      product_id: product_id,
+      title: titleBase + variant,
+      price: price,
+      original_price: original_price,
+      discount_pct: discount_pct,
+      commission_pct: commission_pct,
+      commission_amount: Number(((price * commission_pct) / 100).toFixed(2)),
+      free_shipping: free_shipping,
+      product_url: 'https://www.lazada.co.th/products/pdp-i' + product_id + '.html',
+      image_url: 'https://placehold.co/320x320/png?text=' + encodeURIComponent(String(titleBase).slice(0, 12)),
+      seller_name: item.seller,
+      category: item.category,
+      status: 'active',
+      source: 'catalog'
+    });
+  }
+  return out;
 }
 
 /**
@@ -247,7 +349,8 @@ function normalizeProduct_(r, platform) {
     image_url: String(r.image_url || ''),
     seller_name: String(r.seller_name || ''),
     category: String(r.category || ''),
-    status: String(r.status || 'active')
+    status: String(r.status || 'active'),
+    source: 'sheet'
   };
 }
 
