@@ -109,13 +109,28 @@ function handleSearch_(input) {
     throw new Error('ต้องระบุคำค้นหา q');
   }
 
-  // 1) ชีต  2) Lazada จริง (ผ่าน catalog proxy / Node+Playwright ถ้ามี)  3) คลัง fallback + รูปสินค้า
-  var candidates = findCandidates_(query, platform);
-  if (platform === 'lazada' && candidates.length < topN) {
-    candidates = mergeCandidates_(candidates, fetchCatalogProxy_(query, Math.max(topN, 50)));
+  // 1) Lazada จริง (มีรูป lazcdn)  2) ชีต  3) คลัง fallback + รูปตามหมวด
+  var sheetCandidates = findCandidates_(query, platform);
+  var candidates = sheetCandidates;
+
+  if (platform === 'lazada') {
+    var live = fetchCatalogProxy_(query, Math.max(topN, 50));
+    if (live.length >= topN) {
+      candidates = live;
+    } else if (live.length) {
+      candidates = mergeCandidates_(live, sheetCandidates);
+    } else {
+      // ไม่ดึง live ได้ — ตัดแถวชีตที่เป็น placeholder ออก
+      candidates = sheetCandidates.filter(function (p) {
+        var img = String(p.image_url || '');
+        return img && img.indexOf('placehold.co') === -1;
+      });
+    }
   }
+
   if (candidates.length < topN) {
-    candidates = generateCatalog_(query, platform, Math.max(topN, 50));
+    var generated = generateCatalog_(query, platform, Math.max(topN, 50));
+    candidates = mergeCandidates_(candidates, generated);
   }
 
   var weights = getWeights_();
