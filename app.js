@@ -53,9 +53,43 @@ function catalogProxySearchUrl(q) {
   return u.toString();
 }
 
+const FALLBACK_IMAGES = {
+  fan: [
+    'https://images.unsplash.com/photo-1585771724684-38269b663951?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1625869016776-94be63176578?w=320&h=320&fit=crop',
+  ],
+  shoes: [
+    'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1460353581641-37baddab0fa2?w=320&h=320&fit=crop',
+  ],
+  electronics: [
+    'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1572569511254-d8f925fe2cbb?w=320&h=320&fit=crop',
+  ],
+  home: [
+    'https://images.unsplash.com/photo-1556911220-bff31c812dba?w=320&h=320&fit=crop',
+  ],
+  general: [
+    'https://images.unsplash.com/photo-1472851297630-3b8a6e0c2c3f?w=320&h=320&fit=crop',
+  ],
+};
+
+function fallbackImageForProduct(p) {
+  const hay = `${lastQuery} ${p?.title || ''} ${p?.category || ''}`.toLowerCase();
+  let pool = FALLBACK_IMAGES.general;
+  if (/พัดลม|fan|ตั้งโต๊ะ/.test(hay)) pool = FALLBACK_IMAGES.fan;
+  else if (/รองเท้|sneaker|shoe|ผ้าใบ/.test(hay)) pool = FALLBACK_IMAGES.shoes;
+  else if (/electronics|หูฟัง|เมาส์|คีย์บอร์ด|earbuds|headphone/.test(hay)) {
+    pool = FALLBACK_IMAGES.electronics;
+  } else if (/home|ครัว|หม้อ|กระติก/.test(hay)) pool = FALLBACK_IMAGES.home;
+  const id = String(p?.product_id || '0');
+  const n = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  return pool[n % pool.length];
+}
+
 function hasRealProductImage(p) {
   const url = String(p?.image_url || '').trim();
-  if (!url || /placehold\.co/i.test(url) || /unsplash\.com/i.test(url)) return false;
+  if (!url || /placehold\.co/i.test(url)) return false;
   return /lazcdn\.com/i.test(url);
 }
 
@@ -102,18 +136,16 @@ function setStatus(text) {
 }
 
 function productImageSrc(p) {
-  const url = String(p?.image_url || '').trim();
-  if (!url || /placehold\.co/i.test(url) || /unsplash\.com/i.test(url)) return '';
+  let url = String(p?.image_url || '').trim();
+  if (!url || /placehold\.co/i.test(url)) url = fallbackImageForProduct(p);
   if (/lazcdn\.com/i.test(url)) {
     return url.replace(/_\d+x\d+q\d+\.jpg/i, '_320x320q80.jpg');
   }
-  return '';
+  return url || fallbackImageForProduct(p);
 }
 
 function productThumbHtml(p) {
-  const src = productImageSrc(p);
-  if (!src) return '<div class="thumb-empty" aria-hidden="true"></div>';
-  return `<img src="${escapeHtml(src)}" alt="" loading="lazy" decoding="async" />`;
+  return `<img src="${escapeHtml(productImageSrc(p))}" alt="" loading="lazy" decoding="async" />`;
 }
 
 function priceHtml(p) {

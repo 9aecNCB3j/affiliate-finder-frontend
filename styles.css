@@ -251,17 +251,12 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
-.product img,
-.product .thumb-empty {
+.product img {
   width: 96px;
   height: 96px;
   object-fit: cover;
   border-radius: 12px;
   background: #ece6da;
-}
-
-.product .thumb-empty {
-  flex-shrink: 0;
 }
 
 .product h3 {

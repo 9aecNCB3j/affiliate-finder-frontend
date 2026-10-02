@@ -225,6 +225,44 @@ var CATALOG_SEED_ = [
   { base: 'พัดลม USB พกพา', category: 'Home', seller: 'AirFlow Shop' }
 ];
 
+/** รูปสินค้า fallback เมื่อไม่มี lazada-live — ใช้ Unsplash ตามหมวด */
+var IMAGE_POOLS_ = {
+  shoes: [
+    'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1460353581641-37baddab0fa2?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1525966220533-0102b4b8708c?w=320&h=320&fit=crop'
+  ],
+  fan: [
+    'https://images.unsplash.com/photo-1585771724684-38269b663951?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1625869016776-94be63176578?w=320&h=320&fit=crop'
+  ],
+  Electronics: [
+    'https://images.unsplash.com/photo-1593642632823-8f785ba67e45?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1572569511254-d8f925fe2cbb?w=320&h=320&fit=crop'
+  ],
+  Fashion: [
+    'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=320&h=320&fit=crop'
+  ],
+  Home: [
+    'https://images.unsplash.com/photo-1556911220-bff31c812dba?w=320&h=320&fit=crop',
+    'https://images.unsplash.com/photo-1585771724684-38269b663951?w=320&h=320&fit=crop'
+  ],
+  Beauty: [
+    'https://images.unsplash.com/photo-1556228720-195a672e8a03?w=320&h=320&fit=crop'
+  ],
+  Health: [
+    'https://images.unsplash.com/photo-1584308664954-24d5c474f2ae?w=320&h=320&fit=crop'
+  ],
+  Accessories: [
+    'https://images.unsplash.com/photo-1609091839311-9d67056b9b7f?w=320&h=320&fit=crop'
+  ],
+  General: [
+    'https://images.unsplash.com/photo-1472851297630-3b8a6e0c2c3f?w=320&h=320&fit=crop'
+  ]
+};
+
 function getCatalogProxyBase_() {
   var map = readConfigMap_();
   if ('catalog_proxy_base' in map) {
@@ -293,7 +331,7 @@ function imageQualityRank_(url) {
   var u = String(url || '').trim();
   if (!u) return 0;
   if (/placehold\.co/i.test(u)) return 1;
-  if (/unsplash\.com/i.test(u)) return 1;
+  if (/unsplash\.com/i.test(u)) return 2;
   if (/lazcdn\.com/i.test(u)) return 4;
   return 3;
 }
@@ -310,7 +348,13 @@ function preferRicherProduct_(a, b) {
 function isBadProductImage_(url) {
   var u = String(url || '').trim();
   if (!u) return true;
-  return /placehold\.co/i.test(u) || /unsplash\.com/i.test(u);
+  return /placehold\.co/i.test(u);
+}
+
+function fallbackImageForProduct_(query, p, idx) {
+  var fake = { base: String(p.title || ''), category: String(p.category || '') };
+  var seed = hashSeed_(String(query || '') + ':' + String(p.product_id || idx));
+  return catalogImageFor_(query, fake, seed, idx);
 }
 
 function applyProductImages_(products, query, liveList) {
@@ -328,7 +372,7 @@ function applyProductImages_(products, query, liveList) {
       p.image_url = byId[String(p.product_id)];
       return p;
     }
-    p.image_url = '';
+    p.image_url = fallbackImageForProduct_(query, p, idx);
     return p;
   });
 }
@@ -350,7 +394,7 @@ function proxyHealth_() {
 function normalizeProductImageUrl_(url) {
   var u = String(url || '').trim();
   if (!u) return u;
-  if (/placehold\.co/i.test(u) || /unsplash\.com/i.test(u)) return '';
+  if (/placehold\.co/i.test(u)) return '';
   if (/lazcdn\.com/i.test(u)) {
     u = u.replace(/_\d+x\d+q\d+\.jpg/i, '_320x320q80.jpg');
     if (!/_\d+x\d+/i.test(u) && /\.jpg$/i.test(u)) {
@@ -358,6 +402,16 @@ function normalizeProductImageUrl_(url) {
     }
   }
   return u;
+}
+
+function catalogImageFor_(query, item, seed, idx) {
+  var hay = (String(query || '') + ' ' + String(item.base || '')).toLowerCase();
+  var pool;
+  if (/รองเท้|sneaker|shoe|ผ้าใบ/.test(hay)) pool = IMAGE_POOLS_.shoes;
+  else if (/พัดลม|fan|ตั้งโต๊ะ/.test(hay)) pool = IMAGE_POOLS_.fan;
+  else pool = IMAGE_POOLS_[item.category] || IMAGE_POOLS_.General;
+  if (!pool || !pool.length) pool = IMAGE_POOLS_.General;
+  return pool[pickInt_(seed, idx + 11, 0, pool.length - 1)];
 }
 
 function hashSeed_(input) {
@@ -414,7 +468,7 @@ function generateCatalog_(query, platform, limitPool) {
       commission_amount: Number(((price * commission_pct) / 100).toFixed(2)),
       free_shipping: free_shipping,
       product_url: 'https://www.lazada.co.th/products/pdp-i' + product_id + '.html',
-      image_url: '',
+      image_url: catalogImageFor_(query, item, seed, idx),
       seller_name: item.seller,
       category: item.category,
       status: 'active',
