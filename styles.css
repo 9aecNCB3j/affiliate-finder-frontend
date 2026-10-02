@@ -241,7 +241,7 @@ button:disabled {
 
 .product {
   display: grid;
-  grid-template-columns: 96px 1fr auto;
+  grid-template-columns: 1fr auto;
   gap: 14px;
   align-items: center;
   padding: 14px;
@@ -249,18 +249,6 @@ button:disabled {
   border-radius: 16px;
   background: var(--panel);
   box-shadow: var(--shadow);
-}
-
-.product--no-thumb {
-  grid-template-columns: 1fr auto;
-}
-
-.product img {
-  width: 96px;
-  height: 96px;
-  object-fit: cover;
-  border-radius: 12px;
-  background: #ece6da;
 }
 
 .product h3 {
@@ -382,19 +370,10 @@ code {
 
 @media (max-width: 720px) {
   .product {
-    grid-template-columns: 72px 1fr;
-  }
-
-  .product--no-thumb {
     grid-template-columns: 1fr;
   }
 
   .product button {
     grid-column: 1 / -1;
-  }
-
-  .product img {
-    width: 72px;
-    height: 72px;
   }
 }

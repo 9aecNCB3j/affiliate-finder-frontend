@@ -53,12 +53,6 @@ function catalogProxySearchUrl(q) {
   return u.toString();
 }
 
-function hasRealProductImage(p) {
-  const url = String(p?.image_url || '').trim();
-  if (!url || /placehold\.co/i.test(url) || /unsplash\.com/i.test(url)) return false;
-  return /lazcdn\.com/i.test(url);
-}
-
 async function fetchSearchResults(q) {
   if (CATALOG_PROXY) {
     try {
@@ -68,7 +62,7 @@ async function fetchSearchResults(q) {
       const liveOk =
         !data.error &&
         products.length >= 3 &&
-        products.some((p) => p.source === 'lazada-live' && hasRealProductImage(p));
+        products.some((p) => p.source === 'lazada-live');
       if (liveOk) {
         return { ...data, searchVia: 'catalog-proxy' };
       }
@@ -101,21 +95,6 @@ function setStatus(text) {
   statusEl.textContent = text || '';
 }
 
-function productImageSrc(p) {
-  const url = String(p?.image_url || '').trim();
-  if (!url || /placehold\.co/i.test(url) || /unsplash\.com/i.test(url)) return '';
-  if (/lazcdn\.com/i.test(url)) {
-    return url.replace(/_\d+x\d+q\d+\.jpg/i, '_320x320q80.jpg');
-  }
-  return '';
-}
-
-function productThumbHtml(p) {
-  const src = productImageSrc(p);
-  if (!src) return '';
-  return `<img src="${escapeHtml(src)}" alt="" loading="lazy" decoding="async" />`;
-}
-
 function priceHtml(p) {
   const price = Number(p.price) || 0;
   const original = Number(p.original_price) || 0;
@@ -132,11 +111,8 @@ function totalPages_() {
 }
 
 function productCardHtml(p) {
-  const thumb = productThumbHtml(p);
-  const layoutClass = thumb ? 'product' : 'product product--no-thumb';
   return `
-      <article class="${layoutClass}" data-id="${p.product_id}">
-        ${thumb}
+      <article class="product" data-id="${p.product_id}">
         <div>
           <h3>${escapeHtml(p.title)}</h3>
           <div class="meta">
