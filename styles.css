@@ -385,6 +385,10 @@ code {
     grid-template-columns: 72px 1fr;
   }
 
+  .product--no-thumb {
+    grid-template-columns: 1fr;
+  }
+
   .product button {
     grid-column: 1 / -1;
   }
