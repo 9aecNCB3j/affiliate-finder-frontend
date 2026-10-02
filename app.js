@@ -4,10 +4,6 @@ const API_BASE = String(window.AFFILIATE_API_BASE || '')
 
 const IS_APPS_SCRIPT = /script\.google\.com/i.test(API_BASE);
 
-const CATALOG_PROXY = String(window.CATALOG_PROXY_BASE || '')
-  .trim()
-  .replace(/\/$/, '');
-
 const form = document.getElementById('search-form');
 const queryInput = document.getElementById('query');
 const statusEl = document.getElementById('status');
@@ -44,38 +40,12 @@ function searchUrl(q, opts = {}) {
   return u.toString();
 }
 
-function catalogProxySearchUrl(q) {
-  const u = new URL(`${CATALOG_PROXY}/api/search`);
-  u.searchParams.set('q', q);
-  u.searchParams.set('platform', 'lazada');
-  u.searchParams.set('topN', '50');
-  u.searchParams.set('persist', 'false');
-  return u.toString();
-}
-
 async function fetchSearchResults(q) {
-  if (CATALOG_PROXY) {
-    try {
-      const res = await fetch(catalogProxySearchUrl(q));
-      const data = await res.json();
-      const products = data.products || [];
-      const liveOk =
-        !data.error &&
-        products.length >= 3 &&
-        products.some((p) => p.source === 'lazada-live');
-      if (liveOk) {
-        return { ...data, searchVia: 'catalog-proxy' };
-      }
-    } catch {
-      /* ใช้ Apps Script ต่อ */
-    }
-  }
-
   const res = await fetch(searchUrl(q), { redirect: 'follow' });
   const data = await res.json();
   if (data.error) throw new Error(data.error);
   if (!res.ok) throw new Error(data.error || 'ค้นหาไม่สำเร็จ');
-  return { ...data, searchVia: 'apps-script' };
+  return data;
 }
 
 function selectUrl() {
@@ -228,11 +198,7 @@ form.addEventListener('submit', async (e) => {
   }
 
   searchBtn.disabled = true;
-  setStatus(
-    CATALOG_PROXY
-      ? 'กำลังดึงสินค้า Lazada (รูปจริง)…'
-      : 'กำลังค้นหาและจัดอันดับคุ้มค่าจาก Google Sheet…'
-  );
+  setStatus('กำลังค้นหาและจัดอันดับคุ้มค่าจาก Google Sheet…');
   selectedEl.classList.add('hidden');
   resultsEl.innerHTML = '';
   lastProducts = [];
@@ -250,17 +216,12 @@ form.addEventListener('submit', async (e) => {
 
     const src = data.products?.[0]?.source || 'catalog';
     const srcLabel =
-      data.searchVia === 'catalog-proxy' || src === 'lazada-live'
-        ? 'สินค้าจริง Lazada'
-        : src === 'sheet'
-          ? 'Google Sheet'
-          : src === 'catalog'
-            ? 'จัดอันดับคุ้มค่า'
-            : src;
-    const savedNote =
-      data.searchVia === 'catalog-proxy'
-        ? 'เลือกสินค้าแล้วบันทึกลง Sheet ตอนแปลงลิงก์'
-        : 'บันทึก Sheet แล้ว';
+      src === 'sheet'
+        ? 'Google Sheet'
+        : src === 'catalog'
+          ? 'จัดอันดับคุ้มค่า'
+          : src;
+    const savedNote = 'บันทึก Sheet แล้ว';
 
     if (!data.count) {
       setStatus(`ไม่พบสินค้าสำหรับ “${lastQuery}”`);

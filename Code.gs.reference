@@ -47,10 +47,6 @@ function doGet(e) {
       return json_({ ok: true, service: 'affiliate-finder-apps-script' });
     }
 
-    if (action === 'proxyhealth' || action === 'proxy_health') {
-      return json_(proxyHealth_());
-    }
-
     if (action === 'select') {
       var raw = p.data || p.payload || '';
       var body = raw ? JSON.parse(decodeURIComponent(raw)) : {};
@@ -113,24 +109,8 @@ function handleSearch_(input) {
     throw new Error('ต้องระบุคำค้นหา q');
   }
 
-  // 1) Lazada จริง (มีรูป lazcdn)  2) ชีต  3) คลัง fallback + รูปตามหมวด
-  var sheetCandidates = findCandidates_(query, platform);
-  var candidates = sheetCandidates;
-
-  var live = [];
-  if (platform === 'lazada') {
-    live = fetchCatalogProxy_(query, Math.max(topN, 50));
-    if (live.length >= topN) {
-      candidates = live;
-    } else if (live.length) {
-      candidates = mergeCandidates_(live, sheetCandidates);
-    } else {
-      // ไม่ดึง live ได้ — ตัดแถวชีตที่เป็น placeholder ออก
-      candidates = sheetCandidates.filter(function (p) {
-        return !isBadProductImage_(p.image_url);
-      });
-    }
-  }
+  // 1) ชีต  2) คลัง fallback ให้ครบ Top N
+  var candidates = findCandidates_(query, platform);
 
   if (candidates.length < topN) {
     var generated = generateCatalog_(query, platform, Math.max(topN, 50));
@@ -141,9 +121,9 @@ function handleSearch_(input) {
   var products = scoreProducts_(candidates, weights).slice(0, topN);
   products = products.map(function (p) {
     if (!p.source) p.source = 'catalog';
+    p.image_url = '';
     return p;
   });
-  products = applyProductImages_(products, query, live);
 
   var searchId = uuid_();
   var createdAt = nowIso_();
@@ -225,139 +205,24 @@ var CATALOG_SEED_ = [
   { base: 'พัดลม USB พกพา', category: 'Home', seller: 'AirFlow Shop' }
 ];
 
-function getCatalogProxyBase_() {
-  var map = readConfigMap_();
-  if ('catalog_proxy_base' in map) {
-    var configured = String(map.catalog_proxy_base || '').trim();
-    if (!configured || configured === 'off' || configured === 'false') return '';
-    return configured.replace(/\/$/, '');
-  }
-  // ค่าเริ่มต้นเมื่อยังไม่ตั้งใน config — ต้องรัน Node + tunnel (ดู README)
-  return 'https://hosts-coupons-epic-aud.trycloudflare.com';
-}
-
-/**
- * ดึงสินค้าจริง Lazada (มีรูป lazcdn) ผ่าน Express /api/search บนเครื่องที่รัน Playwright
- */
-function fetchCatalogProxy_(query, limit) {
-  var base = getCatalogProxyBase_();
-  if (!base) return [];
-
-  var want = Math.min(Math.max(1, Number(limit) || 50), 50);
-  var url = base + '/api/search?q=' + encodeURIComponent(String(query || '')) +
-    '&platform=lazada&topN=' + want + '&persist=false';
-
-  try {
-    var resp = UrlFetchApp.fetch(url, {
-      muteHttpExceptions: true,
-      followRedirects: true,
-      validateHttpsCertificates: true,
-      timeout: 120000
-    });
-    if (resp.getResponseCode() >= 400) return [];
-
-    var data = JSON.parse(resp.getContentText());
-    if (data.error) return [];
-
-    return (data.products || []).map(function (raw) {
-      var p = normalizeProduct_(raw, 'lazada');
-      p.source = String(raw.source || 'lazada-live');
-      p.image_url = normalizeProductImageUrl_(p.image_url);
-      return p;
-    }).filter(function (p) {
-      return p.product_id && p.title;
-    });
-  } catch (err) {
-    return [];
-  }
-}
-
 function mergeCandidates_(existing, extra) {
-  var byId = {};
-  function upsert(p) {
+  var seen = {};
+  var out = [];
+  (existing || []).forEach(function (p) {
     if (!p || !p.product_id) return;
     var id = String(p.product_id);
-    var prev = byId[id];
-    if (!prev) {
-      byId[id] = p;
-      return;
-    }
-    byId[id] = preferRicherProduct_(prev, p);
-  }
-  (existing || []).forEach(upsert);
-  (extra || []).forEach(upsert);
-  return Object.keys(byId).map(function (k) { return byId[k]; });
-}
-
-function imageQualityRank_(url) {
-  var u = String(url || '').trim();
-  if (!u) return 0;
-  if (/placehold\.co/i.test(u)) return 1;
-  if (/unsplash\.com/i.test(u)) return 1;
-  if (/lazcdn\.com/i.test(u)) return 4;
-  return 3;
-}
-
-function preferRicherProduct_(a, b) {
-  var qa = imageQualityRank_(a.image_url);
-  var qb = imageQualityRank_(b.image_url);
-  if (qb > qa) return b;
-  if (qa > qb) return a;
-  if (String(b.source || '') === 'lazada-live') return b;
-  return a;
-}
-
-function isBadProductImage_(url) {
-  var u = String(url || '').trim();
-  if (!u) return true;
-  return /placehold\.co/i.test(u) || /unsplash\.com/i.test(u);
-}
-
-function applyProductImages_(products, query, liveList) {
-  var byId = {};
-  (liveList || []).forEach(function (lp) {
-    if (!lp || !lp.product_id || isBadProductImage_(lp.image_url)) return;
-    byId[String(lp.product_id)] = normalizeProductImageUrl_(lp.image_url);
+    if (seen[id]) return;
+    seen[id] = true;
+    out.push(p);
   });
-  return (products || []).map(function (p) {
-    if (!isBadProductImage_(p.image_url)) {
-      p.image_url = normalizeProductImageUrl_(p.image_url);
-      return p;
-    }
-    if (byId[String(p.product_id)]) {
-      p.image_url = byId[String(p.product_id)];
-      return p;
-    }
-    p.image_url = '';
-    return p;
+  (extra || []).forEach(function (p) {
+    if (!p || !p.product_id) return;
+    var id = String(p.product_id);
+    if (seen[id]) return;
+    seen[id] = true;
+    out.push(p);
   });
-}
-
-function proxyHealth_() {
-  var base = getCatalogProxyBase_();
-  if (!base) {
-    return { ok: false, catalog_proxy_base: '', reason: 'disabled' };
-  }
-  var live = fetchCatalogProxy_('พัดลม', 3);
-  return {
-    ok: live.length > 0,
-    catalog_proxy_base: base,
-    live_count: live.length,
-    sample_image: live.length ? live[0].image_url : ''
-  };
-}
-
-function normalizeProductImageUrl_(url) {
-  var u = String(url || '').trim();
-  if (!u) return u;
-  if (/placehold\.co/i.test(u) || /unsplash\.com/i.test(u)) return '';
-  if (/lazcdn\.com/i.test(u)) {
-    u = u.replace(/_\d+x\d+q\d+\.jpg/i, '_320x320q80.jpg');
-    if (!/_\d+x\d+/i.test(u) && /\.jpg$/i.test(u)) {
-      u = u.replace(/\.jpg$/i, '_320x320q80.jpg');
-    }
-  }
-  return u;
+  return out;
 }
 
 function hashSeed_(input) {
@@ -497,7 +362,7 @@ function normalizeProduct_(r, platform) {
     commission_amount: commissionAmount || 0,
     free_shipping: isTrue_(r.free_shipping),
     product_url: productUrl,
-    image_url: normalizeProductImageUrl_(String(r.image_url || '')),
+    image_url: '',
     seller_name: String(r.seller_name || ''),
     category: String(r.category || ''),
     status: String(r.status || 'active'),
@@ -736,8 +601,7 @@ function seedConfig_(sheet) {
     ['currency', 'THB', 'สกุลเงิน'],
     ['lazada_offer_code', '', 'รหัส offer จาก Lazada Affiliate (c.lazada.co.th/t/c.XXX)'],
     ['lazada_member_id', '', 'Affiliate member id'],
-    ['lazada_sub_id', 'aff-finder', 'sub_id สำหรับ track'],
-    ['catalog_proxy_base', 'https://hosts-coupons-epic-aud.trycloudflare.com', 'URL Node /api สำหรับดึงสินค้า+รูป Lazada จริง (ว่าง/off = ปิด)']
+    ['lazada_sub_id', 'aff-finder', 'sub_id สำหรับ track']
   ];
   var toAdd = [];
   seeds.forEach(function (row) {
