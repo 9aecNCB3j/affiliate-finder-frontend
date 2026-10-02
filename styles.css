@@ -251,6 +251,10 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
+.product--no-thumb {
+  grid-template-columns: 1fr auto;
+}
+
 .product img {
   width: 96px;
   height: 96px;
