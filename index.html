@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ค้นหาสินค้าคุ้มค่า · Lazada Affiliate</title>
+    <title>ค้นหาสินค้าคุ้มค่า · Lazada และ Shopee</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -19,7 +19,7 @@
         <span class="brand-mark">AF</span>
         <div>
           <p class="brand-name">Affiliate Finder</p>
-          <p class="brand-sub">Lazada · จัดอันดับสูงสุด 10 รายการ</p>
+          <p class="brand-sub">Lazada และ Shopee · จัดอันดับสูงสุด 10 รายการ</p>
         </div>
       </div>
       <nav class="top-nav">
@@ -31,9 +31,15 @@
       <section class="search-panel">
         <h1>ค้นหาสินค้าที่คุ้มค่าที่สุด</h1>
         <p class="lead">
-          พิมพ์คำค้น ระบบคัดสูงสุด 10 รายการจากราคา ส่วนลด ค่าคอม และส่งฟรี
+          พิมพ์คำค้น ระบบรวม Lazada กับ Shopee แล้วคัดสูงสุด 10 รายการจากราคา ส่วนลด ค่าคอม และส่งฟรี
         </p>
         <form id="search-form" class="search-form">
+          <fieldset class="platform-picker">
+            <legend>แพลตฟอร์ม</legend>
+            <label><input type="radio" name="platform" value="both" checked /> ทั้งคู่</label>
+            <label><input type="radio" name="platform" value="lazada" /> Lazada</label>
+            <label><input type="radio" name="platform" value="shopee" /> Shopee</label>
+          </fieldset>
           <input
             id="query"
             name="q"

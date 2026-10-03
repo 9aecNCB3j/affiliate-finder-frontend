@@ -128,6 +128,40 @@ body {
   flex-wrap: wrap;
 }
 
+.platform-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  flex: 1 1 100%;
+}
+
+.platform-picker legend {
+  padding: 0;
+  margin-right: 4px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.platform-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.platform-picker input {
+  accent-color: var(--accent);
+}
+
 .search-form input {
   flex: 1 1 240px;
   min-height: 48px;
@@ -311,6 +345,16 @@ button:disabled {
 .badge.score {
   border-color: #b7d7c8;
   color: var(--accent);
+}
+
+.badge.platform-lazada {
+  border-color: #f0b4c8;
+  color: #9b2558;
+}
+
+.badge.platform-shopee {
+  border-color: #f3c1a6;
+  color: #b84312;
 }
 
 .product button {

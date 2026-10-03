@@ -18,19 +18,31 @@ let lastSearchId = '';
 let lastQuery = '';
 let lastProducts = [];
 
+function selectedPlatform() {
+  const picked = form.querySelector('input[name="platform"]:checked');
+  return picked ? picked.value : 'both';
+}
+
+function platformName(platform) {
+  if (platform === 'shopee') return 'Shopee';
+  if (platform === 'lazada') return 'Lazada';
+  return platform || '';
+}
+
 function searchUrl(q) {
+  const platform = selectedPlatform();
   if (IS_APPS_SCRIPT) {
     const u = new URL(API_BASE);
     u.searchParams.set('action', 'search');
     u.searchParams.set('q', q);
-    u.searchParams.set('platform', 'lazada');
+    u.searchParams.set('platform', platform);
     u.searchParams.set('topN', String(TOP_N));
     u.searchParams.set('persist', 'false');
     return u.toString();
   }
   const u = new URL(`${API_BASE}/api/search`);
   u.searchParams.set('q', q);
-  u.searchParams.set('platform', 'lazada');
+  u.searchParams.set('platform', platform);
   u.searchParams.set('topN', String(TOP_N));
   u.searchParams.set('persist', 'false');
   return u.toString();
@@ -79,6 +91,7 @@ function productCardHtml(p) {
           <h3>${escapeHtml(p.title)}</h3>
           <div class="meta">
             <span class="badge rank">#${p.rank}</span>
+            <span class="badge platform platform-${escapeHtml(p.platform)}">${escapeHtml(platformName(p.platform))}</span>
             <span class="badge score">คะแนน ${p.value_score}</span>
             ${priceHtml(p)}
             <span>ลด ${p.discount_pct}%</span>
@@ -143,7 +156,8 @@ form.addEventListener('submit', async (e) => {
   }
 
   searchBtn.disabled = true;
-  setStatus('กำลังค้นหา Top 10…');
+  const looking = selectedPlatform() === 'both' ? 'Lazada และ Shopee' : platformName(selectedPlatform());
+  setStatus(`กำลังค้นหา ${looking}…`);
   selectedEl.classList.add('hidden');
   resultsEl.innerHTML = '';
   lastProducts = [];
@@ -156,20 +170,13 @@ form.addEventListener('submit', async (e) => {
     lastQuery = data.query || q;
     lastProducts = data.products || [];
 
-    const src = data.products?.[0]?.source || 'catalog';
-    const srcLabel =
-      src === 'sheet'
-        ? 'จากสินค้าที่เคยเลือก'
-        : src === 'catalog'
-          ? 'จัดอันดับคุ้มค่า'
-          : src;
-
     if (!data.count) {
-      setStatus(`ไม่พบสินค้าสำหรับ “${lastQuery}”`);
+      setStatus(data.warning || `ไม่พบสินค้าสำหรับ “${lastQuery}”`);
     } else {
       renderResults(lastProducts);
+      const mix = `Lazada ${data.lazada_count ?? lastProducts.filter((p) => p.platform === 'lazada').length} · Shopee ${data.shopee_count ?? lastProducts.filter((p) => p.platform === 'shopee').length}`;
       setStatus(
-        `พบ Top ${data.count} รายการสำหรับ “${lastQuery}” · ${srcLabel} · ยังไม่บันทึก Sheet — กดเลือกเพื่อแปลงลิงก์และบันทึก`
+        `พบ Top ${data.count} รายการสำหรับ “${lastQuery}” · ${mix}${data.warning ? ' · ' + data.warning : ''} · กดเลือกเพื่อแปลงลิงก์และบันทึก`
       );
     }
   } catch (err) {
@@ -200,15 +207,22 @@ resultsEl.addEventListener('click', async (e) => {
     if (data.error) throw new Error(data.error);
 
     const affUrl = data.affiliate_url || data.short_link || '';
-    const isReal =
+    const isLazadaLink =
       data.provider === 'adsense-convert-v2' ||
       data.provider === 'adsense-convert-v1' ||
       /^https?:\/\/s\.lazada\.co\.th\//i.test(affUrl);
+    const isShopeeLink =
+      product.platform === 'shopee' &&
+      (data.provider === 'shopee-short' ||
+        data.provider === 'shopee-custom-link' ||
+        /^https?:\/\/s\.shopee\.co\.th\//i.test(affUrl) ||
+        /\/s\/\d+\/\d+\/?$/.test(affUrl));
+    const isReal = isLazadaLink || isShopeeLink;
 
     selectedEl.classList.remove('hidden');
     selectedBody.innerHTML = `
       <p><strong>${escapeHtml(product.title)}</strong></p>
-      <p>แพลตฟอร์ม: ${escapeHtml(product.platform)} · ${escapeHtml(data.provider || data.affiliate_mode || '')}</p>
+      <p>แพลตฟอร์ม: ${escapeHtml(platformName(product.platform))} · ${escapeHtml(data.provider || data.affiliate_mode || '')}</p>
       <p>${isReal ? 'ลิงก์ Affiliate ของคุณ (กดเพื่อสั่งซื้อ):' : 'ลิงก์:'}</p>
       <p><a class="aff-link" href="${escapeHtml(affUrl)}" target="_blank" rel="noopener">${escapeHtml(affUrl)}</a></p>
       <p class="aff-actions">
