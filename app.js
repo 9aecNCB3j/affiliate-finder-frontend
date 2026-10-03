@@ -12,31 +12,27 @@ const selectedEl = document.getElementById('selected');
 const selectedBody = document.getElementById('selected-body');
 const searchBtn = document.getElementById('search-btn');
 
-const PAGE_SIZE = 10;
+const TOP_N = 10;
 
 let lastSearchId = '';
 let lastQuery = '';
 let lastProducts = [];
-let currentPage = 1;
-let lastResultMeta = null;
 
-function searchUrl(q, opts = {}) {
-  const topN = opts.topN ?? 50;
-  const persist = opts.persist ?? true;
+function searchUrl(q) {
   if (IS_APPS_SCRIPT) {
     const u = new URL(API_BASE);
     u.searchParams.set('action', 'search');
     u.searchParams.set('q', q);
     u.searchParams.set('platform', 'lazada');
-    u.searchParams.set('topN', String(topN));
-    if (!persist) u.searchParams.set('persist', 'false');
+    u.searchParams.set('topN', String(TOP_N));
+    u.searchParams.set('persist', 'false');
     return u.toString();
   }
   const u = new URL(`${API_BASE}/api/search`);
   u.searchParams.set('q', q);
   u.searchParams.set('platform', 'lazada');
-  u.searchParams.set('topN', String(topN));
-  if (!persist) u.searchParams.set('persist', 'false');
+  u.searchParams.set('topN', String(TOP_N));
+  u.searchParams.set('persist', 'false');
   return u.toString();
 }
 
@@ -76,10 +72,6 @@ function priceHtml(p) {
     </span>`;
 }
 
-function totalPages_() {
-  return Math.max(1, Math.ceil(lastProducts.length / PAGE_SIZE));
-}
-
 function productCardHtml(p) {
   return `
       <article class="product" data-id="${p.product_id}">
@@ -98,57 +90,10 @@ function productCardHtml(p) {
       </article>`;
 }
 
-function paginationHtml(page, pages, total) {
-  if (pages <= 1) return '';
-  const from = (page - 1) * PAGE_SIZE + 1;
-  const to = Math.min(page * PAGE_SIZE, total);
-  const prevDisabled = page <= 1 ? ' disabled' : '';
-  const nextDisabled = page >= pages ? ' disabled' : '';
-
-  let pageButtons = '';
-  for (let i = 1; i <= pages; i += 1) {
-    const current = i === page ? ' aria-current="page"' : '';
-    pageButtons += `<button type="button" class="pager-num" data-page="${i}"${current}>${i}</button>`;
-  }
-
-  return `
-    <nav class="results-pager" aria-label="เปลี่ยนหน้ารายการสินค้า">
-      <p class="pager-summary">แสดง ${from}–${to} จาก ${total} รายการ · หน้า ${page}/${pages}</p>
-      <div class="pager-controls">
-        <button type="button" class="pager-prev" data-page="${page - 1}"${prevDisabled} aria-label="หน้าก่อน">ก่อนหน้า</button>
-        <div class="pager-nums">${pageButtons}</div>
-        <button type="button" class="pager-next" data-page="${page + 1}"${nextDisabled} aria-label="หน้าถัดไป">ถัดไป</button>
-      </div>
-    </nav>`;
-}
-
-function renderResultsView() {
-  const pages = totalPages_();
-  if (currentPage > pages) currentPage = pages;
-  if (currentPage < 1) currentPage = 1;
-
-  const start = (currentPage - 1) * PAGE_SIZE;
-  const slice = lastProducts.slice(start, start + PAGE_SIZE);
-  const listHtml = slice.map((p) => productCardHtml(p)).join('');
-
+function renderResults(products) {
   resultsEl.innerHTML = `
-    <div class="results-list">${listHtml}</div>
-    ${paginationHtml(currentPage, pages, lastProducts.length)}
+    <div class="results-list">${products.map((p) => productCardHtml(p)).join('')}</div>
   `;
-
-  if (lastResultMeta?.count) {
-    refreshStatusWithPage_();
-  }
-}
-
-function refreshStatusWithPage_() {
-  const { query, count, srcLabel, savedNote } = lastResultMeta;
-  const pages = totalPages_();
-  const from = (currentPage - 1) * PAGE_SIZE + 1;
-  const to = Math.min(currentPage * PAGE_SIZE, count);
-  setStatus(
-    `พบ Top ${count} รายการสำหรับ “${query}” · ${srcLabel} · ${savedNote} · แสดง ${from}–${to} (หน้า ${currentPage}/${pages}) — กดเลือกเพื่อได้ลิงก์ Affiliate`
-  );
 }
 
 function escapeHtml(s) {
@@ -198,12 +143,10 @@ form.addEventListener('submit', async (e) => {
   }
 
   searchBtn.disabled = true;
-  setStatus('กำลังค้นหาและจัดอันดับคุ้มค่าจาก Google Sheet…');
+  setStatus('กำลังค้นหา Top 10…');
   selectedEl.classList.add('hidden');
   resultsEl.innerHTML = '';
   lastProducts = [];
-  currentPage = 1;
-  lastResultMeta = null;
   lastQuery = q;
 
   try {
@@ -212,27 +155,22 @@ form.addEventListener('submit', async (e) => {
     lastSearchId = data.search_id;
     lastQuery = data.query || q;
     lastProducts = data.products || [];
-    currentPage = 1;
 
     const src = data.products?.[0]?.source || 'catalog';
     const srcLabel =
       src === 'sheet'
-        ? 'Google Sheet'
+        ? 'จากสินค้าที่เคยเลือก'
         : src === 'catalog'
           ? 'จัดอันดับคุ้มค่า'
           : src;
-    const savedNote = 'บันทึก Sheet แล้ว';
 
     if (!data.count) {
       setStatus(`ไม่พบสินค้าสำหรับ “${lastQuery}”`);
     } else {
-      lastResultMeta = {
-        query: lastQuery,
-        count: data.count,
-        srcLabel,
-        savedNote,
-      };
-      renderResultsView();
+      renderResults(lastProducts);
+      setStatus(
+        `พบ Top ${data.count} รายการสำหรับ “${lastQuery}” · ${srcLabel} · ยังไม่บันทึก Sheet — กดเลือกเพื่อแปลงลิงก์และบันทึก`
+      );
     }
   } catch (err) {
     setStatus(err.message || 'เชื่อมต่อ Apps Script ไม่ได้');
@@ -242,18 +180,6 @@ form.addEventListener('submit', async (e) => {
 });
 
 resultsEl.addEventListener('click', async (e) => {
-  const pageBtn = e.target.closest('button[data-page]');
-  if (pageBtn && !pageBtn.disabled) {
-    const page = Number(pageBtn.getAttribute('data-page'));
-    const pages = totalPages_();
-    if (page >= 1 && page <= pages && page !== currentPage) {
-      currentPage = page;
-      renderResultsView();
-      resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-    return;
-  }
-
   const btn = e.target.closest('button[data-select]');
   if (!btn) return;
   if (!API_BASE) {
@@ -285,7 +211,7 @@ resultsEl.addEventListener('click', async (e) => {
           : `<p class="status">บันทึกลง Google Sheet แล้ว</p>`
       }
     `;
-    setStatus('เลือกสินค้าสำเร็จ — กดลิงก์เพื่อสั่งซื้อบนมือถือ');
+    setStatus('เลือกสินค้าสำเร็จ — บันทึก Sheet แล้ว · กดลิงก์เพื่อสั่งซื้อบนมือถือ');
     selectedEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
     setStatus(err.message || 'แปลงลิงก์ไม่สำเร็จ');

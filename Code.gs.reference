@@ -99,21 +99,24 @@ function doOptions() {
 
 function handleSearch_(input) {
   ensureSheets_();
+  // ล้างแถว recommended เก่าก่อนอ่าน — ค้นหาเร็วขึ้นเมื่อชีตไม่บวม
+  pruneRecommendedProducts_();
+
   var query = String(input.q || input.query || '').trim();
   var platform = String(input.platform || getConfig_('platform_default', 'lazada')).toLowerCase();
-  var topN = Math.min(Number(input.topN || input.top_n || getConfig_('top_n', '50')) || 50, 50);
-  var persist = String(input.persist == null ? 'true' : input.persist).toLowerCase() !== 'false';
+  var topN = Math.min(Number(input.topN || input.top_n || getConfig_('top_n', '10')) || 10, 10);
+  var persist = String(input.persist == null ? 'false' : input.persist).toLowerCase() === 'true';
   var sessionId = String(input.session_id || '');
 
   if (!query) {
     throw new Error('ต้องระบุคำค้นหา q');
   }
 
-  // 1) ชีต  2) คลัง fallback ให้ครบ Top N
+  // 1) ชีต (เฉพาะที่เคยเลือกไว้)  2) คลัง fallback ให้ครบ Top N
   var candidates = findCandidates_(query, platform);
 
   if (candidates.length < topN) {
-    var generated = generateCatalog_(query, platform, Math.max(topN, 50));
+    var generated = generateCatalog_(query, platform, topN);
     candidates = mergeCandidates_(candidates, generated);
   }
 
@@ -128,6 +131,7 @@ function handleSearch_(input) {
   var searchId = uuid_();
   var createdAt = nowIso_();
 
+  // ค่าเริ่มต้นไม่ persist — บันทึกตอนกดเลือกสินค้า (เร็วขึ้นมาก)
   if (persist) {
     appendRow_('searches', SEARCH_HEADERS, {
       search_id: searchId,
@@ -140,8 +144,8 @@ function handleSearch_(input) {
       session_id: sessionId
     });
 
-    products.forEach(function (p) {
-      appendRow_('products', PRODUCT_HEADERS, {
+    var productRows = products.map(function (p) {
+      return {
         row_id: uuid_(),
         created_at: createdAt,
         updated_at: createdAt,
@@ -166,8 +170,9 @@ function handleSearch_(input) {
         category: p.category,
         status: p.status || 'active',
         notes: 'recommended'
-      });
+      };
     });
+    appendRows_('products', PRODUCT_HEADERS, productRows);
   }
 
   return {
@@ -593,7 +598,7 @@ function seedConfig_(sheet) {
   var map = readConfigMap_();
   var seeds = [
     ['platform_default', 'lazada', 'แพลตฟอร์มเริ่มต้น'],
-    ['top_n', '50', 'จำนวนสินค้าคุ้มค่าที่คืนต่อคำค้น'],
+    ['top_n', '10', 'จำนวนสินค้าคุ้มค่าที่คืนต่อคำค้น'],
     ['weight_price', '0.35', 'น้ำหนักคะแนนราคาถูก'],
     ['weight_discount_pct', '0.25', 'น้ำหนักคะแนนส่วนลด %'],
     ['weight_commission', '0.25', 'น้ำหนักคะแนนค่าคอม'],
@@ -609,6 +614,21 @@ function seedConfig_(sheet) {
   });
   if (toAdd.length) {
     sheet.getRange(sheet.getLastRow() + 1, 1, toAdd.length, 3).setValues(toAdd);
+  }
+  // อัปเดต top_n เก่า (50) → 10
+  if (String(map.top_n || '') === '50') {
+    setConfigValue_(sheet, 'top_n', '10');
+  }
+}
+
+function setConfigValue_(sheet, key, value) {
+  if (!sheet || sheet.getLastRow() < 2) return;
+  var values = sheet.getRange(2, 1, sheet.getLastRow(), 2).getValues();
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][0]) === key) {
+      sheet.getRange(i + 2, 2).setValue(value);
+      return;
+    }
   }
 }
 
@@ -650,11 +670,46 @@ function readObjects_(sheetName, headers) {
 }
 
 function appendRow_(sheetName, headers, obj) {
+  appendRows_(sheetName, headers, [obj]);
+}
+
+/** เขียนหลายแถวครั้งเดียว (เร็วกว่า appendRow ทีละแถว) */
+function appendRows_(sheetName, headers, objects) {
+  if (!objects || !objects.length) return;
   var sheet = ensureSheet_(sheetName, headers);
-  var row = headers.map(function (h) {
-    return obj[h] != null ? obj[h] : '';
+  var rows = objects.map(function (obj) {
+    return headers.map(function (h) {
+      return obj[h] != null ? obj[h] : '';
+    });
   });
-  sheet.appendRow(row);
+  var start = sheet.getLastRow() + 1;
+  sheet.getRange(start, 1, rows.length, headers.length).setValues(rows);
+}
+
+/**
+ * ลบแถว products ที่สะสมจากการค้นหา — คงไว้เฉพาะที่ผู้ใช้เลือกแล้ว
+ */
+function pruneRecommendedProducts_() {
+  var sheet = SpreadsheetApp.getActive().getSheetByName('products');
+  if (!sheet || sheet.getLastRow() < 2) return;
+
+  var width = Math.max(sheet.getLastColumn(), PRODUCT_HEADERS.length);
+  var values = sheet.getRange(1, 1, sheet.getLastRow(), width).getValues();
+  var head = values[0].map(function (h) { return String(h || '').trim(); });
+  var idxSelected = head.indexOf('selected_by_user');
+  if (idxSelected < 0) return;
+
+  var keep = [values[0]];
+  for (var i = 1; i < values.length; i++) {
+    var row = values[i];
+    if (!row.join('')) continue;
+    if (isTrue_(row[idxSelected])) keep.push(row);
+  }
+
+  if (keep.length === values.length) return;
+
+  sheet.clearContents();
+  sheet.getRange(1, 1, keep.length, width).setValues(keep);
 }
 
 /* -------------------- Utils -------------------- */
