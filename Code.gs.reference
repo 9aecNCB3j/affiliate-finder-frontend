@@ -112,10 +112,25 @@ function handleSearch_(input) {
     throw new Error('ต้องระบุคำค้นหา q');
   }
 
-  // 1) ชีต (ชื่อต้องเกี่ยวกับคำค้น)  2) คลัง fallback ที่ชื่อเกี่ยวกับคำค้นเท่านั้น
-  var candidates = findCandidates_(query, platform).filter(function (p) {
-    return titleMatchesQuery_(p.title, query);
-  });
+  // 1) สินค้าจริงจาก Lazada  2) ชีต  3) คลังจำลอง (fallback)
+  var candidates = [];
+  var liveErr = '';
+  if (platform === 'lazada') {
+    try {
+      candidates = searchLazadaLive_(query, Math.max(topN, 20));
+    } catch (liveSearchErr) {
+      liveErr = String(liveSearchErr && liveSearchErr.message ? liveSearchErr.message : liveSearchErr);
+      Logger.log('live search failed: ' + liveErr);
+    }
+  }
+  if (candidates.length < topN) {
+    candidates = mergeCandidates_(
+      candidates,
+      findCandidates_(query, platform).filter(function (p) {
+        return titleMatchesQuery_(p.title, query);
+      })
+    );
+  }
   if (candidates.length < topN) {
     candidates = mergeCandidates_(candidates, generateCatalog_(query, platform, topN));
   }
@@ -175,13 +190,18 @@ function handleSearch_(input) {
     appendRows_('products', PRODUCT_HEADERS, productRows);
   }
 
-  return {
+  var out = {
     search_id: searchId,
     query: query,
     platform: platform,
     count: products.length,
-    products: products
+    products: products,
+    source: products.length && products[0].source ? products[0].source : 'catalog'
   };
+  if (liveErr && out.source !== 'lazada-live') {
+    out.warning = 'ค้นหา Lazada จริงไม่สำเร็จ — ใช้รายการสำรอง (' + liveErr + ')';
+  }
+  return out;
 }
 
 /** คลังสินค้า seed สำหรับสร้างผลค้นหาตามคำค้น (fallback เมื่อชีตว่าง / ไม่พอ) */
@@ -468,6 +488,8 @@ function handleSelect_(body) {
     ok: true,
     row_id: rowId,
     affiliate_url: converted.affiliateUrl,
+    short_link: converted.shortLink || converted.affiliateUrl,
+    product_url: converted.productUrl || productUrl,
     affiliate_mode: converted.mode,
     provider: converted.provider,
     warning: converted.warning || undefined,
@@ -478,8 +500,33 @@ function handleSelect_(body) {
 function toAffiliateLink_(platform, productUrl, productId) {
   var cleanUrl = normalizeProductUrl_(productUrl, productId);
   var p = String(platform || 'lazada').toLowerCase();
+  var requireReal = String(getConfig_('lazada_require_real_affiliate', '1')).toLowerCase() !== '0';
 
   if (p === 'lazada') {
+    // แปลงผ่าน Lazada Affiliate Portal → ได้ s.lazada.co.th (ลิงก์ Affiliate จริง)
+    try {
+      var portal = convertLazadaPortal_(cleanUrl, productId);
+      if (portal && portal.affiliateUrl) {
+        return {
+          affiliateUrl: portal.affiliateUrl,
+          shortLink: portal.shortLink,
+          deepLink: portal.deepLink,
+          longLink: portal.longLink,
+          mode: 'live',
+          provider: portal.provider,
+          productUrl: cleanUrl
+        };
+      }
+    } catch (convErr) {
+      if (requireReal) {
+        throw new Error(
+          'แปลงลิงก์ Affiliate ไม่สำเร็จ: ' +
+            (convErr && convErr.message ? convErr.message : convErr) +
+            ' — รัน npm run adsense-login แล้ว npm run sync-adsense-cookie'
+        );
+      }
+    }
+
     var offerCode = String(getConfig_('lazada_offer_code', '')).trim();
     var memberId = String(getConfig_('lazada_member_id', '')).trim();
     var subId = String(getConfig_('lazada_sub_id', 'aff-finder')).trim() || 'aff-finder';
@@ -493,7 +540,8 @@ function toAffiliateLink_(platform, productUrl, productId) {
       return {
         affiliateUrl: u,
         mode: 'live',
-        provider: 'lazada-offer'
+        provider: 'lazada-offer',
+        warning: 'ใช้ลิงก์ wrap ชั่วคราว — ยังไม่ใช่ short link จาก portal'
       };
     }
 
@@ -506,7 +554,7 @@ function toAffiliateLink_(platform, productUrl, productId) {
       affiliateUrl: direct,
       mode: 'live',
       provider: 'lazada-direct',
-      warning: 'ยังไม่มี lazada_offer_code ในชีต config — ใส่ค่าจาก Lazada Affiliate เพื่อได้ลิงก์ track จริง'
+      warning: 'ยังไม่มี session Affiliate — รัน npm run adsense-login แล้ว npm run sync-adsense-cookie'
     };
   }
 
@@ -521,6 +569,213 @@ function toAffiliateLink_(platform, productUrl, productId) {
   }
 
   return { affiliateUrl: cleanUrl, mode: 'passthrough', provider: p };
+}
+
+/** Cookie จาก Script Properties หรือชีต config */
+function getAdsenseCookie_() {
+  var fromProps = '';
+  try {
+    fromProps = String(PropertiesService.getScriptProperties().getProperty('LAZADA_ADSENSE_COOKIE') || '').trim();
+  } catch (e) {}
+  if (fromProps) return fromProps;
+  return String(getConfig_('lazada_adsense_cookie', '')).trim();
+}
+
+/**
+ * ค้นหาสินค้าจริงจาก Lazada TH (ajax catalog) — ต้องมี session cookie
+ */
+function searchLazadaLive_(query, limit) {
+  var cookie = getAdsenseCookie_();
+  if (!cookie) {
+    throw new Error('ยังไม่มี lazada_adsense_cookie — รัน npm run sync-adsense-cookie');
+  }
+  var want = Math.max(1, Math.min(Number(limit) || 20, 40));
+  var url =
+    'https://www.lazada.co.th/catalog/?q=' +
+    encodeURIComponent(String(query || '').trim()) +
+    '&_keyori=ss&ajax=true&page=1';
+
+  var res = UrlFetchApp.fetch(url, {
+    method: 'get',
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      Accept: 'application/json, text/plain, */*',
+      'Accept-Language': 'th-TH,th;q=0.9,en;q=0.8',
+      Cookie: cookie,
+      Referer: 'https://www.lazada.co.th/',
+      'X-Requested-With': 'XMLHttpRequest'
+    }
+  });
+
+  var code = res.getResponseCode();
+  var text = res.getContentText() || '';
+  if (code < 200 || code >= 300 || text.indexOf('<script>') === 0 || text.indexOf('<!DOCTYPE') === 0) {
+    throw new Error('Lazada catalog ถูกบล็อกหรือ session หมดอายุ (HTTP ' + code + ')');
+  }
+
+  var data;
+  try {
+    data = JSON.parse(text);
+  } catch (parseErr) {
+    throw new Error('Lazada catalog ไม่ใช่ JSON');
+  }
+
+  var items = (data && data.mods && data.mods.listItems) || data.listItems || [];
+  if (!items.length) return [];
+
+  var commissionDefault = Number(getConfig_('default_commission_pct', '5')) || 5;
+  var out = [];
+  for (var i = 0; i < items.length && out.length < want; i++) {
+    var it = items[i] || {};
+    var productId = String(it.itemId || it.nid || '').trim();
+    if (!productId || !/^\d+$/.test(productId)) continue;
+
+    var rawUrl = String(it.itemUrl || it.productUrl || '').trim();
+    if (rawUrl.indexOf('//') === 0) rawUrl = 'https:' + rawUrl;
+    if (!rawUrl) rawUrl = 'https://www.lazada.co.th/products/pdp-i' + productId + '.html';
+    rawUrl = rawUrl.split('?')[0];
+
+    var price = Number(String(it.price || it.priceShow || '').replace(/[^\d.]/g, '')) || 0;
+    var original = Number(String(it.originalPrice || it.price || '').replace(/[^\d.]/g, '')) || price;
+    var discount = Number(it.discount || 0);
+    if (!discount && original > price && original > 0) {
+      discount = Math.round(((original - price) / original) * 1000) / 10;
+    }
+    var title = String(it.name || it.title || '').replace(/\s+/g, ' ').trim();
+    if (!title) continue;
+
+    var commissionPct = commissionDefault;
+    out.push({
+      platform: 'lazada',
+      product_id: productId,
+      title: title,
+      price: price,
+      original_price: original,
+      discount_pct: discount,
+      commission_pct: commissionPct,
+      commission_amount: Number(((price * commissionPct) / 100).toFixed(2)),
+      free_shipping: Boolean(it.isLiveUp || it.tItemType === 'nt_product'),
+      product_url: rawUrl,
+      image_url: '',
+      seller_name: String(it.sellerName || it.brandName || ''),
+      category: String(it.categories || it.category || 'Lazada'),
+      status: 'active',
+      source: 'lazada-live'
+    });
+  }
+  return out;
+}
+
+/**
+ * แปลงลิงก์สินค้า → ลิงก์ Affiliate จริง (shortLink s.lazada.co.th)
+ * POST https://adsense.lazada.co.th/newOffer/link-convert-v2.json
+ */
+function convertLazadaPortal_(productUrl, productId) {
+  var cookie = getAdsenseCookie_();
+  if (!cookie) {
+    throw new Error('ยังไม่มี session Affiliate (lazada_adsense_cookie)');
+  }
+
+  var jumpUrl = String(productUrl || '').trim();
+  if (!jumpUrl) throw new Error('ต้องมี productUrl');
+
+  var headers = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/plain, */*',
+    Origin: 'https://adsense.lazada.co.th',
+    Referer: 'https://adsense.lazada.co.th/index.htm',
+    Cookie: cookie,
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  };
+
+  var res = UrlFetchApp.fetch('https://adsense.lazada.co.th/newOffer/link-convert-v2.json', {
+    method: 'post',
+    muteHttpExceptions: true,
+    contentType: 'application/json',
+    payload: JSON.stringify({ jumpUrl: jumpUrl }),
+    headers: headers
+  });
+
+  var code = res.getResponseCode();
+  var data = {};
+  try {
+    data = JSON.parse(res.getContentText() || '{}');
+  } catch (e) {
+    data = {};
+  }
+
+  if (code >= 200 && code < 300 && data.success && data.data) {
+    var shortLink = data.data.shortLink || null;
+    var deepLink = data.data.deepLink || null;
+    var longLink = deepLinkToWebUrl_(deepLink, productId);
+    var affiliateUrl = shortLink || longLink || deepLink || jumpUrl;
+    return {
+      affiliateUrl: affiliateUrl,
+      shortLink: shortLink,
+      deepLink: deepLink,
+      longLink: longLink,
+      provider: 'adsense-convert-v2'
+    };
+  }
+
+  // fallback v1
+  var res1 = UrlFetchApp.fetch('https://adsense.lazada.co.th/newOffer/link-convert.json', {
+    method: 'post',
+    muteHttpExceptions: true,
+    contentType: 'application/json',
+    payload: JSON.stringify({ jumpUrl: jumpUrl }),
+    headers: headers
+  });
+  var data1 = {};
+  try {
+    data1 = JSON.parse(res1.getContentText() || '{}');
+  } catch (e2) {
+    data1 = {};
+  }
+  if (data1.success && typeof data1.message === 'string' && data1.message.indexOf('http') === 0) {
+    return {
+      affiliateUrl: data1.message,
+      shortLink: data1.message,
+      deepLink: null,
+      longLink: null,
+      provider: 'adsense-convert-v1'
+    };
+  }
+
+  var msg = (data && data.message) || (data1 && data1.message) || ('HTTP ' + code);
+  throw new Error(String(msg));
+}
+
+function deepLinkToWebUrl_(deepLink, productId) {
+  if (!deepLink || String(deepLink).indexOf('lazada://') !== 0) return null;
+  try {
+    var q = deepLink.indexOf('?') >= 0 ? deepLink.substring(deepLink.indexOf('?') + 1) : '';
+    var params = {};
+    String(q)
+      .split('&')
+      .forEach(function (part) {
+        if (!part) return;
+        var kv = part.split('=');
+        var k = decodeURIComponent(kv[0] || '');
+        var v = decodeURIComponent(kv.slice(1).join('=') || '');
+        if (k) params[k] = v;
+      });
+    var itemId = params.itemId || productId || '';
+    if (!itemId || itemId === 'null') return null;
+    var web = 'https://www.lazada.co.th/products/pdp-i' + itemId + '.html';
+    var keys = ['exlaz', 'laz_share_info', 'laz_token', 'c', 'dsource', 'from_affiliate'];
+    var qs = [];
+    keys.forEach(function (key) {
+      if (params[key]) qs.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
+    });
+    return qs.length ? web + '?' + qs.join('&') : web;
+  } catch (e) {
+    return null;
+  }
 }
 
 function normalizeProductUrl_(productUrl, productId) {
@@ -635,7 +890,9 @@ function seedConfig_(sheet) {
     ['currency', 'THB', 'สกุลเงิน'],
     ['lazada_offer_code', '', 'รหัส offer จาก Lazada Affiliate (c.lazada.co.th/t/c.XXX)'],
     ['lazada_member_id', '', 'Affiliate member id'],
-    ['lazada_sub_id', 'aff-finder', 'sub_id สำหรับ track']
+    ['lazada_sub_id', 'aff-finder', 'sub_id สำหรับ track'],
+    ['lazada_adsense_cookie', '', 'Cookie จาก adsense.lazada.co.th (npm run sync-adsense-cookie)'],
+    ['lazada_require_real_affiliate', '1', '1 = บังคับแปลงลิงก์ Affiliate จริงจาก portal']
   ];
   var toAdd = [];
   seeds.forEach(function (row) {

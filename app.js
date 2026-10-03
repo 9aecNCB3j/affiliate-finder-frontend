@@ -199,23 +199,49 @@ resultsEl.addEventListener('click', async (e) => {
     });
     if (data.error) throw new Error(data.error);
 
+    const affUrl = data.affiliate_url || data.short_link || '';
+    const isReal =
+      data.provider === 'adsense-convert-v2' ||
+      data.provider === 'adsense-convert-v1' ||
+      /^https?:\/\/s\.lazada\.co\.th\//i.test(affUrl);
+
     selectedEl.classList.remove('hidden');
     selectedBody.innerHTML = `
       <p><strong>${escapeHtml(product.title)}</strong></p>
-      <p>แพลตฟอร์ม: ${escapeHtml(product.platform)} · โหมด: ${escapeHtml(data.affiliate_mode)} · ${escapeHtml(data.provider || '')}</p>
-      <p>ลิงก์ Affiliate:</p>
-      <p><a class="aff-link" href="${escapeHtml(data.affiliate_url)}" target="_blank" rel="noopener">${escapeHtml(data.affiliate_url)}</a></p>
+      <p>แพลตฟอร์ม: ${escapeHtml(product.platform)} · ${escapeHtml(data.provider || data.affiliate_mode || '')}</p>
+      <p>${isReal ? 'ลิงก์ Affiliate ของคุณ (กดเพื่อสั่งซื้อ):' : 'ลิงก์:'}</p>
+      <p><a class="aff-link" href="${escapeHtml(affUrl)}" target="_blank" rel="noopener">${escapeHtml(affUrl)}</a></p>
+      <p class="aff-actions">
+        <a class="btn-buy" href="${escapeHtml(affUrl)}" target="_blank" rel="noopener">เปิดลิงก์สั่งซื้อ</a>
+        <button type="button" class="btn-copy" data-copy="${escapeAttr(affUrl)}">คัดลอกลิงก์</button>
+      </p>
       ${
         data.warning
           ? `<p class="status" style="color:var(--warn)">${escapeHtml(data.warning)}</p>`
-          : `<p class="status">บันทึกลง Google Sheet แล้ว</p>`
+          : `<p class="status">${isReal ? 'แปลงลิงก์ Affiliate สำเร็จ · บันทึก Sheet แล้ว' : 'บันทึก Sheet แล้ว'}</p>`
       }
     `;
-    setStatus('เลือกสินค้าสำเร็จ — บันทึก Sheet แล้ว · กดลิงก์เพื่อสั่งซื้อบนมือถือ');
+    setStatus(
+      isReal
+        ? 'ได้ลิงก์ Affiliate แล้ว — กด “เปิดลิงก์สั่งซื้อ” เพื่อซื้อด้วยตัวเอง'
+        : 'เลือกสินค้าแล้ว แต่ยังไม่ใช่ลิงก์ Affiliate จริง'
+    );
     selectedEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
     setStatus(err.message || 'แปลงลิงก์ไม่สำเร็จ');
   } finally {
     btn.disabled = false;
+  }
+});
+
+selectedBody.addEventListener('click', async (e) => {
+  const copyBtn = e.target.closest('[data-copy]');
+  if (!copyBtn) return;
+  const text = copyBtn.getAttribute('data-copy') || '';
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus('คัดลอกลิงก์ Affiliate แล้ว');
+  } catch {
+    setStatus('คัดลอกไม่สำเร็จ — ลากเลือกลิงก์แล้วคัดลอกเอง');
   }
 });

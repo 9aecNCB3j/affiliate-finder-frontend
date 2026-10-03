@@ -337,6 +337,37 @@ button:disabled {
   font-weight: 600;
 }
 
+.aff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.btn-buy,
+.btn-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.btn-buy {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-copy {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--line);
+}
+
 .dash-list {
   display: grid;
   gap: 10px;
