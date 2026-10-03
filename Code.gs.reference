@@ -7,7 +7,7 @@
  *   Who has access: Anyone
  *
  * API (CORS-friendly):
- *   GET  ?action=search&q=หูฟัง&platform=lazada&topN=50
+ *   GET  ?action=search&q=หูฟัง&platform=lazada&topN=10
  *   POST text/plain JSON { action: "select", ...product }
  *   GET  ?action=select&data=<encodeURIComponent(JSON)>
  */
@@ -112,12 +112,12 @@ function handleSearch_(input) {
     throw new Error('ต้องระบุคำค้นหา q');
   }
 
-  // 1) ชีต (เฉพาะที่เคยเลือกไว้)  2) คลัง fallback ให้ครบ Top N
-  var candidates = findCandidates_(query, platform);
-
+  // 1) ชีต (ชื่อต้องเกี่ยวกับคำค้น)  2) คลัง fallback ที่ชื่อเกี่ยวกับคำค้นเท่านั้น
+  var candidates = findCandidates_(query, platform).filter(function (p) {
+    return titleMatchesQuery_(p.title, query);
+  });
   if (candidates.length < topN) {
-    var generated = generateCatalog_(query, platform, topN);
-    candidates = mergeCandidates_(candidates, generated);
+    candidates = mergeCandidates_(candidates, generateCatalog_(query, platform, topN));
   }
 
   var weights = getWeights_();
@@ -245,38 +245,61 @@ function pickInt_(buf, offset, min, max) {
   return min + (n % (max - min + 1));
 }
 
+/** ส่วนขยายชื่อเมื่อคำค้นไม่อยู่ในคลัง seed — ชื่อต้องเกี่ยวกับคำค้นเท่านั้น */
+var QUERY_TITLE_SUFFIXES_ = [
+  'พรีเมียม', 'สูตรอ่อนโยน', 'แพ็คคุ้ม', 'ขนาดพกพา', 'ออร์แกนิก',
+  'กลิ่นหอม', 'เซ็ตคู่', 'รีฟิล', 'ยอดนิยม', 'ใช้ประจำวัน'
+];
+
+var QUERY_SELLERS_ = [
+  'DailyMart TH', 'HomeCare Official', 'CleanPlus', 'ValueShop', 'SoftLife Store'
+];
+
 /**
- * สร้างรายการสินค้าตามคำค้น (Top N) เมื่อยังไม่มีในชีต — คง UX เดิม: พิมพ์แล้วได้ผล + แปลงลิงก์ได้
+ * สร้างรายการสินค้าตามคำค้น (Top N) — ชื่อต้องเกี่ยวกับคำค้นเท่านั้น ไม่ผสมสินค้าคนละหมวด
  */
 function generateCatalog_(query, platform, limitPool) {
   var q = String(query || '').trim();
   if (!q) return [];
-  var want = Math.max(1, Number(limitPool) || 50);
+  var want = Math.max(1, Number(limitPool) || 10);
   var seed = hashSeed_(String(platform) + ':' + q.toLowerCase());
   var qLower = q.toLowerCase();
+  var tokens = tokenize_(q);
+
   var matched = CATALOG_SEED_.filter(function (item) {
-    return item.base.toLowerCase().indexOf(qLower) !== -1 ||
-      q.split(/\s+/).some(function (w) {
-        return w.length > 1 && item.base.indexOf(w) !== -1;
-      });
+    var base = String(item.base || '').toLowerCase();
+    return tokens.every(function (t) { return base.indexOf(t) !== -1; });
   });
-  var basePool = matched.length >= 3 ? matched : CATALOG_SEED_;
+
   var commissionDefault = Number(getConfig_('default_commission_pct', '5')) || 5;
   var out = [];
   for (var idx = 0; idx < want; idx++) {
-    var item = basePool[idx % basePool.length];
     var original_price = pickInt_(seed, idx * 3, 399, 2490);
     var discount_pct = Number((pickInt_(seed, idx * 3 + 1, 15, 55) + (idx % 20)).toFixed(1));
     var price = Math.round(original_price * (1 - discount_pct / 100));
     var commission_pct = Number((pickInt_(seed, idx * 3 + 2, 4, 12) + (idx % 3)).toFixed(1)) || commissionDefault;
     var free_shipping = pickInt_(seed, idx + 7, 0, 1) === 1 || idx < 2;
     var product_id = String(1000000000 + pickInt_(seed, idx * 5, 100000, 899999999) + idx);
-    var variant = idx >= basePool.length ? ' #' + (idx + 1) : '';
-    var titleBase = matched.length >= 3 ? item.base : (q + ' ' + item.base);
+
+    var title;
+    var seller;
+    var category;
+    if (matched.length) {
+      var item = matched[idx % matched.length];
+      title = item.base + (idx >= matched.length ? ' #' + (idx + 1) : '');
+      seller = item.seller;
+      category = item.category;
+    } else {
+      var suffix = QUERY_TITLE_SUFFIXES_[idx % QUERY_TITLE_SUFFIXES_.length];
+      title = q + ' ' + suffix + (idx >= QUERY_TITLE_SUFFIXES_.length ? ' #' + (idx + 1) : '');
+      seller = QUERY_SELLERS_[idx % QUERY_SELLERS_.length];
+      category = 'General';
+    }
+
     out.push({
       platform: platform || 'lazada',
       product_id: product_id,
-      title: titleBase + variant,
+      title: title,
       price: price,
       original_price: original_price,
       discount_pct: discount_pct,
@@ -285,13 +308,21 @@ function generateCatalog_(query, platform, limitPool) {
       free_shipping: free_shipping,
       product_url: 'https://www.lazada.co.th/products/pdp-i' + product_id + '.html',
       image_url: '',
-      seller_name: item.seller,
-      category: item.category,
+      seller_name: seller,
+      category: category,
       status: 'active',
       source: 'catalog'
     });
   }
   return out;
+}
+
+/** ชื่อสินค้าต้องมีทุก token ของคำค้น */
+function titleMatchesQuery_(title, query) {
+  var tokens = tokenize_(query);
+  if (!tokens.length) return false;
+  var hay = String(title || '').toLowerCase();
+  return tokens.every(function (t) { return hay.indexOf(t) !== -1; });
 }
 
 /**
@@ -311,10 +342,8 @@ function findCandidates_(query, platform) {
     var pPlatform = String(r.platform || '').toLowerCase();
     if (platform && pPlatform && pPlatform !== platform) return;
 
-    var hay = [
-      r.title, r.query, r.category, r.seller_name, r.product_id, r.notes
-    ].join(' ').toLowerCase();
-
+    // จับคู่จากชื่อสินค้า (+ หมวด) เท่านั้น — ไม่ใช้คอลัมน์ query (เคยทำให้ผลผิดหมวด)
+    var hay = [r.title, r.category].join(' ').toLowerCase();
     if (!tokens.every(function (t) { return hay.indexOf(t) !== -1; })) return;
 
     var id = String(r.product_id || '').trim();
