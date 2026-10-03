@@ -95,6 +95,12 @@ function doOptions() {
     .setMimeType(ContentService.MimeType.TEXT);
 }
 
+/** รันครั้งเดียวจากตัวแก้ไขเพื่อขอสิทธิ์ UrlFetchApp (external_request) */
+function authorizeExternalRequest() {
+  UrlFetchApp.fetch('https://www.google.com', { muteHttpExceptions: true });
+  return 'ok';
+}
+
 /* -------------------- Search -------------------- */
 
 function handleSearch_(input) {
